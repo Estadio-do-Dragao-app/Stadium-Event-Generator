@@ -1,0 +1,6 @@
+pysocialforce
+matplotlib
+paho-mqtt
+numpy
+pandas
+numba==0.58.1

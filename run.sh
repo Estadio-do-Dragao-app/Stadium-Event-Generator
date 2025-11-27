@@ -13,7 +13,7 @@ source venv/bin/activate
 # Força instalação das dependências essenciais
 echo "Instalando/atualizando dependências..."
 pip install --upgrade pip -q
-pip install tqdm numpy matplotlib opencv-python pysocialforce numba -q
+pip install tqdm opencv-python numpy matplotlib pysocialforce numba==0.58.1 paho-mqtt pandas
 
 # Se houver requirements.txt, usa-o também
 [ -f requirements.txt ] && pip install -r requirements.txt -q

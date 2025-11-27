@@ -16,7 +16,7 @@ call venv\Scripts\activate.bat
 REM Força instalação das dependências essenciais (mesmo que requirements.txt falhe)
 echo Instalando/atualizando dependencias...
 python -m pip install --upgrade pip -q
-python -m pip install tqdm numpy matplotlib opencv-python pysocialforce numba --quiet
+pip install tqdm opencv-python numpy matplotlib pysocialforce numba==0.58.1 paho-mqtt pandas
 
 REM Se houver requirements.txt, usa-o também
 if exist requirements.txt (

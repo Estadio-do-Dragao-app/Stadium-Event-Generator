@@ -2,7 +2,7 @@
 
 Emulador de multidões + gerador de eventos em tempo real para as apps **Fan** e **Staff**.
 
-## Como correr
+## how to run
 ```bash
 # Windows: duplo-clique em run_simulation.bat
 # Linux: corre run.sh

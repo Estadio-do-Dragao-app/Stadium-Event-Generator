@@ -1,6 +1,6 @@
 pysocialforce
 matplotlib
-paho-mqtt
+paho-mqtt==1.6.1
 numpy
 pandas
 numba==0.58.1

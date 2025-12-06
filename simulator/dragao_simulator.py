@@ -1,960 +1,841 @@
-# simulator/event_generator_system.py
+"""
+Simulador principal do Estádio do Dragão.
+"""
 from matplotlib.image import imread
 import numpy as np
 import matplotlib.pyplot as plt
 import os
 import json
 import time
-import uuid
-from datetime import datetime
 import threading
+from datetime import datetime
 from collections import defaultdict
 
-try:
-    import paho.mqtt.client as mqtt
-    MQTT_AVAILABLE = True
-except ImportError:
-    MQTT_AVAILABLE = False
+# Mantemos a mesma importação
+from mqtt_broker import StadiumMQTTClient, get_broker
+from stadium_boundaries import StadiumBoundaries
+from event_generator import EventGenerator, MQTT_TOPIC_ALL_EVENTS, MQTT_TOPIC_QUEUES
 
-print("=== STADIUM EVENT GENERATOR SYSTEM ===")
+print("\n" + "="*60)
+print("ESTADIO DO DRAGAO - SIMULADOR COMPLETO")
+print("="*60)
 
-MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
-MQTT_TOPIC_EVENTS = "stadium/events"
+class StadiumSimulation:
+    """Simulação completa do estádio"""
+    def __init__(self, num_people=300, duration=350):
+        self.output_dir = "../outputs"
+        self.num_people = num_people
+        self.duration = duration
+        self.fps = 1
 
-class MQTTPublisher:
-    def __init__(self, broker, port, topic):
-        self.broker = broker
-        self.port = port
-        self.topic = topic
-        self.client = None
-        self.connected = False
+        self.total_people = num_people
+        self.simulation_duration = duration
         
-        if MQTT_AVAILABLE:
-            self.client = mqtt.Client(protocol=mqtt.MQTTv5)
-            self.client.on_connect = self._on_connect
+        self.output_dir = "../outputs"
+        
+        self.event_log = []
+        self.queue_data_log = []
+        self.phase_changes = []
+        self.seated_count = 0
+        self.at_bars_count = 0
+        self.at_wc_count = 0
+        self.queue_bars_count = 0
+        self.queue_wc_count = 0
+        self.exited_count = 0
+        
+        print("Tentando conectar ao Mosquitto MQTT Broker...")
+        
+        # Tentar conectar com retry
+        max_retries = 3
+        connected = False
+        
+        for attempt in range(max_retries):
             try:
-                self.client.connect(self.broker, self.port, 60)
-                self.client.loop_start()
-                time.sleep(1)
+                self.mqtt_client = StadiumMQTTClient("stadium_simulator")
+                result = self.mqtt_client.connect()
+                if result == 0:
+                    print(f"✓ Conectado ao Mosquitto (tentativa {attempt + 1}/{max_retries})")
+                    connected = True
+                    break
+                else:
+                    print(f"✗ Falha na conexão (tentativa {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        print("Tentando novamente em 2 segundos...")
+                        time.sleep(2)
             except Exception as e:
-                print(f"MQTT não disponível: {e}")
-    
-    def _on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            self.connected = True
-            print("✅ Conectado ao broker MQTT")
-    
-    def publish_event(self, event):
-        if self.connected and self.client:
-            self.client.publish(self.topic, json.dumps(event))
-
-class EventGenerator:
-    def __init__(self, mqtt_publisher):
-        self.mqtt_publisher = mqtt_publisher
-        self.events = []
-        self.event_count = 0
+                print(f"Erro: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
         
-        # Contadores para estatísticas
-        self.gate_counters = defaultdict(int)
-        self.zone_counters = defaultdict(int)
-        self.queue_counters = defaultdict(lambda: {"count": 0, "arrivals": [], "departures": []})
-        self.bin_fill_levels = {}
+        if not connected:
+            print("\n⚠ Não foi possível conectar ao Mosquitto")
+            print("Verifique se o serviço está rodando:")
+            print("  net start mosquitto")
+            print("\nContinuando com modo offline...")
+            class DummyClient:
+                def publish(self, *args, **kwargs):
+                    return 0
+                def subscribe(self, *args, **kwargs):
+                    return (0, [0])
+                def on_message(self, *args, **kwargs):
+                    pass
+                def disconnect(self, *args, **kwargs):
+                    pass
+                def get_stats(self):
+                    return {'messages_count': 0}
+            self.mqtt_client = DummyClient()
         
-    def generate_event(self, event_type, person_id, location, metadata=None):
-        """Evento genérico de pessoa"""
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": event_type,
-            "timestamp": datetime.now().isoformat() + "Z",
-            "person_id": f"P_{person_id:06d}",
-            "ticket_id": f"TKT_{person_id:06d}",
-            "location": location,
-            "metadata": metadata or {}
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    # ========== EVENTOS DE PORTÃO ==========
-    
-    def generate_gate_event(self, gate_name, person_id, direction="entry"):
-        """Evento de passagem por portão (STAFF APP - gate counts)"""
-        self.gate_counters[gate_name] += 1 if direction == "entry" else -1
+        # Criar gerador de eventos
+        self.event_gen = EventGenerator(self.mqtt_client)
         
-        throughput = np.random.uniform(15, 25)
+        # Criar boundaries
+        self.boundaries = StadiumBoundaries()
         
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "gate_passage",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "gate_id": gate_name,
-            "person_id": f"P_{person_id:06d}",
-            "direction": direction,
-            "current_count": self.gate_counters[gate_name],
-            "throughput_per_min": round(throughput, 1),
-            "metadata": {
-                "heat_level": "red" if self.gate_counters[gate_name] > 150 
-                             else "yellow" if self.gate_counters[gate_name] > 80 
-                             else "green"
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    # ========== EVENTOS DE CAIXOTES ==========
-    
-    def generate_bin_event(self, bin_id, location, fill_percentage=None):
-        """Evento de enchimento de caixote do lixo (STAFF APP - maintenance)"""
-        if fill_percentage is None:
-            current = self.bin_fill_levels.get(bin_id, 0)
-            fill_percentage = min(100, current + np.random.uniform(5, 15))
+        # Estado da simulação
+        self.positions = None
+        self.states = None
+        self.destinations = None
         
-        self.bin_fill_levels[bin_id] = fill_percentage
+        # Variáveis de controle
+        self.service_times_bar = None
+        self.time_in_facility = None
+        self.queue_positions = None
+        self.current_queues = defaultdict(list)
+        self.facility_occupancy = defaultdict(int)
+        self.assigned_seats = {}
+        self.assigned_zones = {}
+        self.entry_gates = {}
+        self.current_destinations = {}
+        self.queue_wait_times = None
+        self.queue_start_times = None
+        self.in_queue = None
         
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "bin_status",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "bin_id": bin_id,
-            "location": {"x": float(location[0]), "y": float(location[1])},
-            "fill_percentage": round(fill_percentage, 1),
-            "needs_service": fill_percentage > 85,
-            "metadata": {
-                "priority": "critical" if fill_percentage > 95 
-                           else "high" if fill_percentage > 85 
-                           else "medium" if fill_percentage > 70 
-                           else "low",
-                "poi_node": f"N{abs(hash(bin_id)) % 1000}"
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    def generate_bin_overflow_alert(self, bin_id, location):
-        """Alerta CRÍTICO de caixote a transbordar (específico para Cleaning)"""
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "bin_overflow_alert",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "bin_id": bin_id,
-            "location": {"x": float(location[0]), "y": float(location[1])},
-            "priority": "high",
-            "assigned_role": "cleaning",
-            "metadata": {
-                "action_required": "empty_bin",
-                "poi_node": f"N{abs(hash(bin_id)) % 1000}"
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    # ========== EVENTOS DE SENSORES DE INCÊNDIO ==========
-    
-    def generate_fire_alarm_event(self, sensor_id, location, smoke_level, temperature):
-        """
-        Evento de alarme de incêndio/fumo (sensor físico)
-        Sensor de fumo/temperatura deteta anomalia
-        """
-        alarm_id = f"FIRE-{uuid.uuid4().hex[:6]}"
-        
-        # Determina severidade baseada nos valores dos sensores
-        if smoke_level > 80 or temperature > 60:
-            severity = "critical"
-            priority = "critical"
-        elif smoke_level > 50 or temperature > 45:
-            severity = "high"
-            priority = "high"
-        else:
-            severity = "medium"
-            priority = "medium"
-        
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "fire_alarm",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "alarm_id": alarm_id,
-            "sensor_id": sensor_id,
-            "priority": priority,
-            "location": {"x": float(location[0]), "y": float(location[1])},
-            "sensor_readings": {
-                "smoke_level_pct": round(smoke_level, 1),  # 0-100%
-                "temperature_celsius": round(temperature, 1)
-            },
-            "severity": severity,
-            "assigned_role": "security",  # Security coordena evacuação
-            "status": "active",  # active, investigating, resolved, false_alarm
-            "metadata": {
-                "requires_evacuation": severity == "critical",
-                "poi_node": f"N{abs(hash(sensor_id)) % 1000}",
-                "affected_zones": []  # zonas próximas a evacuar
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    def generate_staff_dispatch(self, alarm_id, staff_ids, staff_role, eta_seconds, route):
-        """
-        Despacho de equipa para alarme de incêndio
-        Múltiplos staff podem ser despachados
-        """
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "staff_dispatch",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "alarm_id": alarm_id,
-            "staff_ids": staff_ids,  # lista de staff
-            "staff_role": staff_role,  # security (coordena evacuação)
-            "eta_seconds": eta_seconds,
-            "route": route,
-            "metadata": {
-                "team_size": len(staff_ids),
-                "dispatch_reason": "fire_alarm_response"
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    def generate_staff_assignment(self, incident_id, staff_id, staff_role, eta_seconds, route):
-        """Evento de atribuição de staff (Security/Cleaning/Supervisor)"""
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "staff_assignment",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "incident_id": incident_id,
-            "staff_id": staff_id,
-            "staff_role": staff_role,
-            "eta_seconds": eta_seconds,
-            "route": route,
-            "metadata": {
-                "assignment_method": "nearest_available"
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    # ========== EVENTOS DE EVACUAÇÃO ==========
-    
-    def generate_evacuation_event(self, edge_from, edge_to, reason="smoke"):
-        """Evento de evacuação com fecho de corredor (AMBOS APPS)"""
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "evac_update",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "closure": {
-                "edge": f"{edge_from}-{edge_to}",
-                "from_node": edge_from,
-                "to_node": edge_to,
-                "reason": reason,
-                "closed": True
-            },
-            "metadata": {
-                "severity": "critical" if reason in ["fire", "structural"] 
-                           else "high" if reason == "smoke" 
-                           else "medium"
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    # ========== EVENTOS DE DENSIDADE ==========
-    
-    def generate_density_event(self, area_id, area_type, count, capacity, location_center):
-        """Evento de densidade de pessoas numa área (AMBOS APPS - heatmap)"""
-        occupancy_rate = (count / capacity * 100) if capacity > 0 else 0
-        
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "crowd_density",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "area_id": area_id,
-            "area_type": area_type,
-            "current_count": count,
-            "capacity": capacity,
-            "occupancy_rate": round(occupancy_rate, 1),
-            "location": {"x": float(location_center[0]), "y": float(location_center[1])},
-            "heat_level": "red" if occupancy_rate > 80 
-                         else "yellow" if occupancy_rate > 50 
-                         else "green",
-            "metadata": {}
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    # ========== EVENTOS DE FILAS ==========
-    
-    def generate_queue_event(self, location_type, location_id, location, queue_length, avg_service_time=None):
-        """Evento de fila de espera (FAN APP - wait times)"""
-        if avg_service_time is None:
-            avg_service_time = 2.0 if location_type == "TOILET" else 3.5
-        
-        wait_time_min = queue_length * avg_service_time if queue_length > 0 else 0
-        
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "event_type": "queue_update",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "location_type": location_type,
-            "location_id": location_id,
-            "location": {"x": float(location[0]), "y": float(location[1])},
-            "queue_length": queue_length,
-            "estimated_wait_min": round(wait_time_min, 1),
-            "metadata": {
-                "status": "crowded" if wait_time_min > 8 
-                         else "busy" if wait_time_min > 4 
-                         else "normal",
-                "avg_service_time_min": avg_service_time
-            }
-        }
-        self.events.append(event)
-        self.mqtt_publisher.publish_event(event)
-        self.event_count += 1
-        return event
-    
-    # ========== HELPERS ==========
-    
-    def update_zone_occupancy(self, zone_id, delta):
-        """Atualiza contador de ocupação de zona"""
-        self.zone_counters[zone_id] += delta
-        self.zone_counters[zone_id] = max(0, self.zone_counters[zone_id])
-
-class StadiumBoundaries:
-    def __init__(self):
-        self.stadium_bounds = {'x_min': -60, 'x_max': 60, 'y_min': -45, 'y_max': 45}
-        self.field_center = [0, 0]
-        self.field_radius_x = 35
-        self.field_radius_y = 20
-        
-        self.gates = {
-            'GATE_NORTH': [0, 48],
-            'GATE_SOUTH': [0, -48],
-            'GATE_EAST': [60, 0],
-            'GATE_WEST': [-60, 0]
+        # Timeline
+        self.timeline = {
+            "pre_game": 60, 
+            "game_start": 120, 
+            "half_time": 180, 
+            "game_resume": 240, 
+            "game_end": 280,
+            "evacuation_complete": 350
         }
         
-        self.bars = {
-            'BAR_NORTE': [0, 35],
-            'BAR_SUL': [0, -35],
-            'BAR_LESTE': [45, 0],
-            'BAR_OESTE': [-45, 0]
-        }
+        # Carregar imagem
+        self.stadium_img = None
+        self.img_extent = [-70, 70, -55, 55]
+        self.use_image = False
+        self._load_stadium_image()
         
-        self.toilets = {
-            'WC_NORTE_1': [40, 30],
-            'WC_NORTE_2': [-40, 30],
-            'WC_SUL_1': [40, -30],
-            'WC_SUL_2': [-40, -30],
-            'WC_LESTE': [50, 0],
-            'WC_OESTE': [-50, 0]
-        }
-        
-        self.seating_areas = {
-            'NORTE_1': [-55, 40], 'NORTE_2': [-35, 40], 'NORTE_3': [-15, 40], 
-            'NORTE_4': [15, 40], 'NORTE_5': [35, 40], 'NORTE_6': [55, 40],
-            'SUL_1': [-55, -40], 'SUL_2': [-35, -40], 'SUL_3': [-15, -40], 
-            'SUL_4': [15, -40], 'SUL_5': [35, -40], 'SUL_6': [55, -40],
-            'LESTE_1': [55, 25], 'LESTE_2': [55, 5], 'LESTE_3': [55, -25],
-            'OESTE_1': [-55, 25], 'OESTE_2': [-55, 5], 'OESTE_3': [-55, -25]
-        }
-        
-        self.zone_capacities = {
-            **{k: 200 for k in self.seating_areas.keys()},
-            **{k: 50 for k in self.bars.keys()},
-            **{k: 30 for k in self.toilets.keys()},
-            **{k: 100 for k in self.gates.keys()}
-        }
-        
-        self.bins = {
-            'BIN_NORTE_1': [-30, 38], 'BIN_NORTE_2': [30, 38],
-            'BIN_SUL_1': [-30, -38], 'BIN_SUL_2': [30, -38],
-            'BIN_LESTE': [52, 0], 'BIN_OESTE': [-52, 0],
-            'BIN_BAR_NORTE': [5, 35], 'BIN_BAR_SUL': [5, -35]
-        }
+        print(f"Simulacao configurada com {num_people} pessoas, duracao: {duration}s")
     
-    def is_inside_stadium(self, x, y):
-        return (self.stadium_bounds['x_min'] <= x <= self.stadium_bounds['x_max'] and 
-                self.stadium_bounds['y_min'] <= y <= self.stadium_bounds['y_max'])
+    def _load_stadium_image(self):
+        """Carrega imagem do estádio"""
+        try:
+            self.stadium_img = imread("map_stadium.png")
+            
+            # Processar imagem para walkable areas
+            gray = np.dot(self.stadium_img[...,:3], [0.299, 0.587, 0.114])
+            self.walkable_mask = gray > 0.55
+            
+            # Suavizar máscara
+            for _ in range(4):
+                self.walkable_mask = np.logical_and.reduce([
+                    self.walkable_mask,
+                    np.roll(self.walkable_mask, 1, axis=0),
+                    np.roll(self.walkable_mask, -1, axis=0),
+                    np.roll(self.walkable_mask, 1, axis=1),
+                    np.roll(self.walkable_mask, -1, axis=1)
+                ])
+            
+            self.use_image = True
+            print("Imagem do estadio carregada com sucesso")
+            
+        except Exception as e:
+            print(f"Imagem nao carregada: {e}")
+            self.use_image = False
     
-    def is_inside_field(self, x, y):
-        norm_x = (x - self.field_center[0]) / self.field_radius_x
-        norm_y = (y - self.field_center[1]) / self.field_radius_y
-        return (norm_x**2 + norm_y**2) <= 1.0
-    
-    def is_position_allowed(self, x, y):
-        return self.is_inside_stadium(x, y) and not self.is_inside_field(x, y)
-    
-    def get_nearest_gate(self, position):
-        gates_list = list(self.gates.values())
-        distances = [np.linalg.norm(np.array(position) - np.array(gate)) for gate in gates_list]
-        nearest_idx = np.argmin(distances)
-        return list(self.gates.keys())[nearest_idx], list(self.gates.values())[nearest_idx]
-    
-    def get_nearest_bar(self, position):
-        bars_list = list(self.bars.values())
-        distances = [np.linalg.norm(np.array(position) - np.array(bar)) for bar in bars_list]
-        nearest_idx = np.argmin(distances)
-        return list(self.bars.keys())[nearest_idx], list(self.bars.values())[nearest_idx]
-    
-    def get_nearest_toilet(self, position):
-        toilets_list = list(self.toilets.values())
-        distances = [np.linalg.norm(np.array(position) - np.array(toilet)) for toilet in toilets_list]
-        nearest_idx = np.argmin(distances)
-        return list(self.toilets.keys())[nearest_idx], list(self.toilets.values())[nearest_idx]
-    
-    def get_seat_near_gate(self, gate_name):
-        if gate_name == 'GATE_NORTH':
-            area_keys = ['NORTE_1', 'NORTE_2', 'NORTE_3', 'NORTE_4', 'NORTE_5', 'NORTE_6']
-        elif gate_name == 'GATE_SOUTH':
-            area_keys = ['SUL_1', 'SUL_2', 'SUL_3', 'SUL_4', 'SUL_5', 'SUL_6']
-        elif gate_name == 'GATE_EAST':
-            area_keys = ['LESTE_1', 'LESTE_2', 'LESTE_3']
-        else:
-            area_keys = ['OESTE_1', 'OESTE_2', 'OESTE_3']
-        
-        area_key = np.random.choice(area_keys)
-        area_center = self.seating_areas[area_key]
-        x = area_center[0] + np.random.uniform(-8, 8)
-        y = area_center[1] + np.random.uniform(-5, 5)
-        return area_key, [x, y]
-    
-    def get_zone_at_position(self, position):
-        """Identifica em que zona a pessoa está"""
-        x, y = position
-        
-        for bar_name, bar_pos in self.bars.items():
-            if np.linalg.norm(np.array(position) - np.array(bar_pos)) < 5:
-                return bar_name, "service"
-        
-        for toilet_name, toilet_pos in self.toilets.items():
-            if np.linalg.norm(np.array(position) - np.array(toilet_pos)) < 5:
-                return toilet_name, "service"
-        
-        for area_name, area_pos in self.seating_areas.items():
-            if abs(x - area_pos[0]) < 10 and abs(y - area_pos[1]) < 8:
-                return area_name, "seating"
-        
-        return "CORRIDOR", "corridor"
-
-def run_stadium_simulation():
-    print("INICIANDO SIMULAÇÃO COMPLETA COM TODOS OS EVENTOS")
-
-    mqtt_publisher = MQTTPublisher(MQTT_BROKER, MQTT_PORT, MQTT_TOPIC_EVENTS)
-    event_gen = EventGenerator(mqtt_publisher)
-    boundaries = StadiumBoundaries()
-
-    FPS = 5
-    SIMULATION_DURATION = 300
-    STEPS = SIMULATION_DURATION * FPS
-    n_pedestrians = 150
-
-    TIMELINE = {
-        "pre_game": 60, 
-        "game_start": 120, 
-        "half_time": 180, 
-        "game_resume": 240, 
-        "game_end": 280,
-        "evacuation_complete": 300
-    }
-
-    START_POSITIONS = [
-        [0, 47.4], [-10.6, 45.5],
-        [-13, -44.6], [17, -43.8]
-    ]
-
-    try:
-        stadium_img = imread("map_stadium.png")
-        img_extent = [-70, 70, -55, 55]
-        use_image = True
-        
-        gray = np.dot(stadium_img[...,:3], [0.299, 0.587, 0.114])
-        walkable_mask = gray > 0.55
-        
-        for _ in range(4):
-            walkable_mask = np.logical_and.reduce([walkable_mask,
-                np.roll(walkable_mask, 1, axis=0), np.roll(walkable_mask, -1, axis=0),
-                np.roll(walkable_mask, 1, axis=1), np.roll(walkable_mask, -1, axis=1)])
-                
-        def is_walkable_from_image(x, y):
-            ix = int((x - img_extent[0]) / (img_extent[1] - img_extent[0]) * stadium_img.shape[1])
-            iy = int((y - img_extent[2]) / (img_extent[3] - img_extent[2]) * stadium_img.shape[0])
-            iy = stadium_img.shape[0] - 1 - iy
-            if not (0 <= ix < stadium_img.shape[1] and 0 <= iy < stadium_img.shape[0]):
+    def is_position_valid(self, x, y):
+        """Verifica se posição é válida"""
+        if self.use_image:
+            # Converter coordenadas para pixels
+            ix = int((x - self.img_extent[0]) / (self.img_extent[1] - self.img_extent[0]) * self.stadium_img.shape[1])
+            iy = int((y - self.img_extent[2]) / (self.img_extent[3] - self.img_extent[2]) * self.stadium_img.shape[0])
+            iy = self.stadium_img.shape[0] - 1 - iy
+            
+            if not (0 <= ix < self.stadium_img.shape[1] and 0 <= iy < self.stadium_img.shape[0]):
                 return False
-            return walkable_mask[iy, ix]
-            
-    except Exception as e:
-        print(f"⚠️  Imagem não carregada: {e}")
-        use_image = False
-        img_extent = [-70, 70, -55, 55]
-        is_walkable_from_image = lambda x, y: boundaries.is_position_allowed(x, y)
-
-    def is_position_valid(x, y):
-        if use_image:
-            return is_walkable_from_image(x, y)
+            return self.walkable_mask[iy, ix]
         else:
-            return boundaries.is_position_allowed(x, y)
-
-    positions = np.zeros((n_pedestrians, 2))
-    states = np.zeros(n_pedestrians, dtype=int)
-    destinations = np.zeros((n_pedestrians, 2))
+            return self.boundaries.is_position_allowed(x, y)
     
-    service_times = np.random.uniform(TIMELINE["half_time"] + 5, TIMELINE["game_resume"] - 10, n_pedestrians)
+    def setup_people(self):
+        """Configura as pessoas iniciais"""
+        print(f"Configurando {self.num_people} pessoas...")
+        
+        # Inicializar arrays
+        self.positions = np.zeros((self.num_people, 2))
+        self.states = np.zeros(self.num_people, dtype=int)
+        self.destinations = np.zeros((self.num_people, 2))
+        self.service_times_bar = np.random.uniform(
+            self.timeline["half_time"] + 5, 
+            self.timeline["game_resume"] - 10, 
+            self.num_people
+        )
+        self.time_in_facility = np.zeros(self.num_people)
+        self.queue_positions = np.zeros(self.num_people, dtype=int)
+        self.queue_wait_times = np.zeros(self.num_people)
+        self.queue_start_times = np.zeros(self.num_people)
+        self.in_queue = np.zeros(self.num_people, dtype=bool)
+        
+        START_POSITIONS = [
+            [-4.8, 45.2],[0.2, -48.3]
+        ]
+        
+        for i in range(self.num_people):
+            start_pos = START_POSITIONS[i % len(START_POSITIONS)]
+            self.positions[i] = start_pos
+            
+            # Portão mais próximo
+            nearest_gate_name, _ = self.boundaries.get_nearest_gate(start_pos)
+            self.entry_gates[i] = nearest_gate_name
+            
+            # Assento atribuído
+            zone_name, seat_pos = self.boundaries.get_seat_near_gate(nearest_gate_name)
+            self.assigned_seats[i] = seat_pos
+            self.assigned_zones[i] = zone_name
+            
+            # Verificar se posição é válida
+            while not self.is_position_valid(seat_pos[0], seat_pos[1]):
+                zone_name, seat_pos = self.boundaries.get_seat_near_gate(nearest_gate_name)
+                self.assigned_seats[i] = seat_pos
+                self.assigned_zones[i] = zone_name
+            
+            # Estado inicial
+            self.states[i] = 3  # Indo ao lugar
+            self.destinations[i] = seat_pos.copy()
+            
+            # Gerar evento
+            self.event_gen.generate_gate_event(nearest_gate_name, i, direction="entry")
+        
+        # Inicializar bins
+        for bin_id in self.boundaries.bins.keys():
+            self.event_gen.bin_fill_levels[bin_id] = np.random.uniform(10, 30)
+        
+        print("Pessoas configuradas")
     
-    assigned_seats = {}
-    assigned_zones = {}
-    entry_gates = {}
-    current_destinations = {}
+    def update_queues(self, current_time):
+        """Atualiza eventos de filas"""
+        # Filas nos bares
+        for bar_name, bar_info in self.boundaries.bars.items():
+            queue_length = len(self.current_queues.get(bar_name, []))
+            capacity = bar_info['queue_spots']
+            center = bar_info['center']
+            
+            self.event_gen.generate_queue_event(
+                "BAR", bar_name, center, queue_length, capacity, avg_service_time=3.5
+            )
+        
+        # Filas nas casas de banho
+        for toilet_name, toilet_info in self.boundaries.toilets.items():
+            queue_length = len(self.current_queues.get(toilet_name, []))
+            capacity = toilet_info['queue_spots']
+            center = toilet_info['center']
+            
+            self.event_gen.generate_queue_event(
+                "TOILET", toilet_name, center, queue_length, capacity, avg_service_time=2.0
+            )
     
-    for bin_id in boundaries.bins.keys():
-        event_gen.bin_fill_levels[bin_id] = np.random.uniform(10, 30)
-
-    for i in range(n_pedestrians):
-        start_pos = START_POSITIONS[i % len(START_POSITIONS)]
-        positions[i] = start_pos
-        
-        nearest_gate_name, nearest_gate_pos = boundaries.get_nearest_gate(start_pos)
-        entry_gates[i] = nearest_gate_name
-        
-        zone_name, seat_pos = boundaries.get_seat_near_gate(nearest_gate_name)
-        assigned_seats[i] = seat_pos
-        assigned_zones[i] = zone_name
-        
-        while not is_position_valid(assigned_seats[i][0], assigned_seats[i][1]):
-            zone_name, seat_pos = boundaries.get_seat_near_gate(nearest_gate_name)
-            assigned_seats[i] = seat_pos
-            assigned_zones[i] = zone_name
-
-        states[i] = 3
-        destinations[i] = assigned_seats[i].copy()
-        
-        event_gen.generate_event("person_inside_stadium", i,
-            {"x": float(positions[i][0]), "y": float(positions[i][1])},
-            {"initial_position": True, "nearest_gate": nearest_gate_name})
-        
-        event_gen.generate_gate_event(nearest_gate_name, i, direction="entry")
-
-    plt.ion()
-    fig, ax = plt.subplots(figsize=(14, 11))
+    def update_bins(self, current_time):
+        """Atualiza caixotes"""
+        for bin_id, bin_pos in self.boundaries.bins.items():
+            current = self.event_gen.bin_fill_levels.get(bin_id, 0)
+            
+            if self.timeline["half_time"] <= current_time < self.timeline["game_resume"]:
+                increment = np.random.uniform(8, 15)
+            else:
+                increment = np.random.uniform(2, 5)
+            
+            fill_percentage = min(100, current + increment)
+            
+            self.event_gen.generate_bin_event(bin_id, bin_pos, fill_percentage)
+            
+            if fill_percentage > 95:
+                self.event_gen.generate_bin_overflow_alert(bin_id, bin_pos)
+            
+            self.event_gen.bin_fill_levels[bin_id] = fill_percentage
     
-    last_density_update = 0
-    last_queue_update = 0
-    last_bin_update = 0
-    evacuation_triggered = False
-
-    # ========== SENSORES DE INCÊNDIO ==========
-    # Simula sensores de fumo/temperatura
-
-    fire_sensors = {
-        'SENSOR_BAR_NORTE': boundaries.bars['BAR_NORTE'],
-        'SENSOR_BAR_SUL': boundaries.bars['BAR_SUL'],
-        'SENSOR_WC_NORTE': boundaries.toilets['WC_NORTE_1'],
-        'SENSOR_WC_SUL': boundaries.toilets['WC_SUL_1'],
-        'SENSOR_CORREDOR_LESTE': [55, 15],
-        'SENSOR_CORREDOR_OESTE': [-55, 15]
-    }
-
-    fire_alarm_triggered = False
-
-    for step in range(STEPS):
-        current_time = step / FPS
-        ax.clear()
-        
-        if use_image:
-            ax.imshow(stadium_img, extent=img_extent, aspect='equal')
-        else:
-            ax.set_facecolor('#003366')
-            stadium_rect = plt.Rectangle((boundaries.stadium_bounds['x_min'], boundaries.stadium_bounds['y_min']),
-                                       boundaries.stadium_bounds['x_max'] - boundaries.stadium_bounds['x_min'],
-                                       boundaries.stadium_bounds['y_max'] - boundaries.stadium_bounds['y_min'],
-                                       fill=False, edgecolor='white', linewidth=3)
-            ax.add_patch(stadium_rect)
+    def update_people(self, current_time):
+        """Atualiza todas as pessoas"""
+        for i in range(self.num_people):
+            current_pos = self.positions[i]
             
-            field = plt.Ellipse(boundaries.field_center, 
-                              boundaries.field_radius_x * 2, boundaries.field_radius_y * 2,
-                              facecolor='darkgreen', alpha=0.7)
-            ax.add_patch(field)
-            
-            for gate_name, gate_pos in boundaries.gates.items():
-                ax.plot(gate_pos[0], gate_pos[1], 'go', markersize=10, alpha=0.7)
-                ax.text(gate_pos[0], gate_pos[1] + 3, gate_name, ha='center', va='bottom', 
-                       color='green', fontweight='bold', fontsize=8)
-            
-            for bar_name, bar_pos in boundaries.bars.items():
-                ax.plot(bar_pos[0], bar_pos[1], 'ro', markersize=15, alpha=0.7)
-                ax.text(bar_pos[0], bar_pos[1] + 3, bar_name, ha='center', va='bottom', 
-                       color='red', fontweight='bold', fontsize=8)
-            
-            for toilet_name, toilet_pos in boundaries.toilets.items():
-                ax.plot(toilet_pos[0], toilet_pos[1], 'bo', markersize=12, alpha=0.7)
-                ax.text(toilet_pos[0], toilet_pos[1] + 3, toilet_name, ha='center', va='bottom', 
-                       color='blue', fontweight='bold', fontsize=8)
-            
-            for bin_name, bin_pos in boundaries.bins.items():
-                fill = event_gen.bin_fill_levels.get(bin_name, 0)
-                color = 'red' if fill > 85 else 'orange' if fill > 70 else 'gray'
-                ax.plot(bin_pos[0], bin_pos[1], 'o', color=color, markersize=8, alpha=0.6)
-            
-            # Mostrar sensores de incêndio
-            for sensor_name, sensor_pos in fire_sensors.items():
-                ax.plot(sensor_pos[0], sensor_pos[1], 's', color='darkred', markersize=10, alpha=0.7)
-                ax.text(sensor_pos[0], sensor_pos[1] + 2, sensor_name, ha='center', va='bottom', 
-                       color='darkred', fontweight='bold', fontsize=6)
-        
-        ax.axis('off')
-        ax.set_xlim(img_extent[0], img_extent[1])
-        ax.set_ylim(img_extent[2], img_extent[3])
-
-        phase = "ENTRADA"
-        if current_time > TIMELINE["game_end"]: phase = "SAÍDA"
-        elif current_time > TIMELINE["game_resume"]: phase = "2ª PARTE"
-        elif current_time > TIMELINE["half_time"]: phase = "INTERVALO"
-        elif current_time > TIMELINE["game_start"]: phase = "1ª PARTE"
-        elif current_time > TIMELINE["pre_game"]: phase = "PRÉ-JOGO"
-
-        ax.set_title(f"ESTÁDIO DO DRAGÃO — {phase} — {current_time:.0f}s — Eventos: {event_gen.event_count}",
-                     fontsize=16, color="white", backgroundcolor="#000080", pad=20)
-
-        # ========== EVENTOS PERIÓDICOS ==========
-        
-        if current_time - last_density_update >= 10:
-            for zone_name in list(boundaries.seating_areas.keys()) + list(boundaries.bars.keys()) + list(boundaries.toilets.keys()):
-                count = event_gen.zone_counters.get(zone_name, 0)
-                capacity = boundaries.zone_capacities.get(zone_name, 100)
-                location = boundaries.seating_areas.get(zone_name) or boundaries.bars.get(zone_name) or boundaries.toilets.get(zone_name)
-                
-                if location:
-                    zone_type = "seating" if zone_name in boundaries.seating_areas else "service"
-                    event_gen.generate_density_event(zone_name, zone_type, count, capacity, location)
-            
-            last_density_update = current_time
-        
-        if current_time - last_queue_update >= 8:
-            for bar_name, bar_pos in boundaries.bars.items():
-                queue_length = event_gen.zone_counters.get(bar_name, 0)
-                event_gen.generate_queue_event("BAR", bar_name, bar_pos, queue_length, avg_service_time=3.5)
-            
-            for toilet_name, toilet_pos in boundaries.toilets.items():
-                queue_length = event_gen.zone_counters.get(toilet_name, 0)
-                event_gen.generate_queue_event("TOILET", toilet_name, toilet_pos, queue_length, avg_service_time=2.0)
-            
-            last_queue_update = current_time
-        
-        if current_time - last_bin_update >= 15:
-            for bin_id, bin_pos in boundaries.bins.items():
-                increment = np.random.uniform(8, 15) if TIMELINE["half_time"] <= current_time < TIMELINE["game_resume"] else np.random.uniform(2, 5)
-                event_gen.generate_bin_event(bin_id, bin_pos)
-                
-                if event_gen.bin_fill_levels.get(bin_id, 0) > 95:
-                    event_gen.generate_bin_overflow_alert(bin_id, bin_pos)
-                    print(f"🗑️  BIN OVERFLOW: {bin_id} precisa de limpeza urgente!")
-            
-            last_bin_update = current_time
-
-        # ========== SENSORES DE INCÊNDIO ==========
-
-        # ALARME DE INCÊNDIO: sensor de fumo/temperatura (muito raro)
-        if not fire_alarm_triggered and TIMELINE["game_start"] < current_time < TIMELINE["game_end"]:
-            if np.random.random() < 0.001:  # 0.1% chance (muito raro)
-                
-                # Escolhe sensor aleatório
-                sensor_id = np.random.choice(list(fire_sensors.keys()))
-                sensor_location = fire_sensors[sensor_id]
-                
-                # Simula leituras do sensor (valores anormais)
-                smoke_level = np.random.uniform(60, 95)  # % de fumo
-                temperature = np.random.uniform(40, 70)   # °C
-                
-                alarm = event_gen.generate_fire_alarm_event(
-                    sensor_id,
-                    sensor_location,
-                    smoke_level,
-                    temperature
-                )
-                
-                print(f"🔥 ALARME DE INCÊNDIO: {sensor_id} - Fumo: {smoke_level:.0f}% Temp: {temperature:.0f}°C em t={current_time:.0f}s")
-                
-                # Despacha equipa de segurança
-                staff_team = [f"STAFF_SECURITY_{i:03d}" for i in range(1, 4)]  # 3 seguranças
-                
-                event_gen.generate_staff_dispatch(
-                    alarm["alarm_id"],
-                    staff_team,
-                    "security",
-                    eta_seconds=np.random.randint(30, 90),
-                    route=[f"N{np.random.randint(1, 100)}" for _ in range(4)]
-                )
-                
-                # Se severidade CRITICAL → fecha corredor próximo (evacuação)
-                if alarm["severity"] == "critical":
-                    nearby_nodes = ["N23", "N24"]  # nós próximos do sensor
-                    event_gen.generate_evacuation_event(
-                        nearby_nodes[0], 
-                        nearby_nodes[1], 
-                        reason="fire"
-                    )
-                    print(f"⚠️  EVACUAÇÃO INICIADA: corredor {nearby_nodes[0]}-{nearby_nodes[1]} fechado")
-                
-                fire_alarm_triggered = True
-        
-        if not evacuation_triggered and current_time > TIMELINE["game_end"] + 5:
-            if np.random.random() < 0.01:
-                event_gen.generate_evacuation_event("N23", "N24", reason="crowd")
-                evacuation_triggered = True
-                print(f"⚠️  EVACUAÇÃO: corredor N23-N24 fechado em t={current_time:.0f}s")
-
-        # ========== LÓGICA DE MOVIMENTO ==========
-        
-        for i in range(n_pedestrians):
-            current_pos = positions[i]
-
-            if states[i] == 3:
-                direction = destinations[i] - current_pos
+            # Estado 3: Indo para o lugar
+            if self.states[i] == 3:
+                direction = self.destinations[i] - current_pos
                 distance = np.linalg.norm(direction)
                 
                 if distance > 1.0:
                     step_vector = (direction / distance) * 0.8
                     new_pos = current_pos + step_vector
                     
-                    if is_position_valid(new_pos[0], new_pos[1]):
-                        positions[i] = new_pos
+                    if self.is_position_valid(new_pos[0], new_pos[1]):
+                        self.positions[i] = new_pos
                     else:
                         angle = np.random.uniform(-0.5, 0.5)
                         rotation = np.array([[np.cos(angle), -np.sin(angle)], 
                                            [np.sin(angle), np.cos(angle)]])
-                        positions[i] = current_pos + rotation @ step_vector * 0.8
+                        self.positions[i] = current_pos + rotation @ step_vector * 0.8
                 else:
-                    states[i] = 4
-                    positions[i] = assigned_seats[i].copy()
-                    
-                    event_gen.update_zone_occupancy(assigned_zones[i], +1)
-                    
-                    event_gen.generate_event("person_sat_down", i,
-                        {"x": float(positions[i][0]), "y": float(positions[i][1])}, 
-                        {"seat_id": f"SEAT_{i:04d}", "gate": entry_gates[i], "zone": assigned_zones[i]})
-
-            if (states[i] == 4 and 
-                TIMELINE["half_time"] <= current_time < TIMELINE["game_resume"] and
-                current_time >= service_times[i]):
+                    self.states[i] = 4  # Sentado
+                    self.event_gen.update_zone_occupancy(self.assigned_zones[i], +1)
+            
+            # Estado 4: Sentado - pode ir a serviços
+            elif self.states[i] == 4:
+                time_since_last = current_time - self.queue_start_times[i] if self.queue_start_times[i] > 0 else 1000
                 
-                event_gen.update_zone_occupancy(assigned_zones[i], -1)
+                # No intervalo
+                if self.timeline["half_time"] <= current_time < self.timeline["game_resume"]:
+                    # Ir ao bar
+                    if current_time >= self.service_times_bar[i] and np.random.random() < 0.1 and time_since_last > 120:
+                        self._go_to_bar(i)
+                    # Ir à casa de banho
+                    elif np.random.random() < 0.05 and time_since_last > 120:
+                        self._go_to_toilet(i)
+                # Durante o jogo
+                elif time_since_last > 180 and np.random.random() < 0.01:
+                    self._go_to_toilet(i)
+            
+            # Estados de movimento
+            elif self.states[i] == 5:  # Indo ao bar
+                self._move_to_service(i, 0.7)
+            elif self.states[i] == 9:  # Indo à casa de banho
+                self._move_to_service(i, 0.7)
+            
+            # Estados em fila
+            elif self.states[i] == 6:  # Fila do bar
+                self._manage_bar_queue(i)
+            elif self.states[i] == 10:  # Fila da casa de banho
+                self._manage_toilet_queue(i)
+            
+            # Estados em serviço
+            elif self.states[i] == 7:  # No bar
+                self._manage_bar_service(i)
+            elif self.states[i] == 11:  # Na casa de banho
+                self._manage_toilet_service(i)
+            
+            # Estados de retorno
+            elif self.states[i] == 8:  # Voltando do bar
+                self._return_to_seat(i)
+            elif self.states[i] == 12:  # Voltando da casa de banho
+                self._return_to_seat(i)
+    
+    def _go_to_bar(self, i):
+        """Pessoa decide ir ao bar"""
+        bar_name, bar_info = self.boundaries.get_nearest_bar(self.positions[i])
+        self.event_gen.update_zone_occupancy(self.assigned_zones[i], -1)
+        self.states[i] = 5
+        self.current_destinations[i] = bar_name
+        self.destinations[i] = bar_info['center']
+        self.queue_start_times[i] = time.time()
+    
+    def _go_to_toilet(self, i):
+        """Pessoa decide ir à casa de banho"""
+        toilet_name, toilet_info = self.boundaries.get_nearest_toilet(self.positions[i])
+        self.event_gen.update_zone_occupancy(self.assigned_zones[i], -1)
+        self.states[i] = 9
+        self.current_destinations[i] = toilet_name
+        self.destinations[i] = toilet_info['center']
+        self.queue_start_times[i] = time.time()
+    
+    def _move_to_service(self, i, speed):
+        """Move pessoa para serviço"""
+        direction = self.destinations[i] - self.positions[i]
+        distance = np.linalg.norm(direction)
+        
+        if distance > 2.0:
+            step_vector = (direction / distance) * speed
+            new_pos = self.positions[i] + step_vector
+            
+            if self.is_position_valid(new_pos[0], new_pos[1]):
+                self.positions[i] = new_pos
+            else:
+                angle = np.random.uniform(-0.5, 0.5)
+                rotation = np.array([[np.cos(angle), -np.sin(angle)], 
+                                   [np.sin(angle), np.cos(angle)]])
+                self.positions[i] = self.positions[i] + rotation @ step_vector * speed
+        else:
+            # Chegou ao serviço
+            if self.states[i] == 5:
+                self._arrive_at_bar(i)
+            else:
+                self._arrive_at_toilet(i)
+    
+    def _arrive_at_bar(self, i):
+        """Pessoa chega ao bar"""
+        bar_name = self.current_destinations[i]
+        bar_info = self.boundaries.bars[bar_name]
+        
+        if self.facility_occupancy.get(bar_name, 0) < bar_info['capacity']:
+            # Entra no bar
+            self.states[i] = 7
+            self.facility_occupancy[bar_name] += 1
+            self.time_in_facility[i] = np.random.uniform(bar_info['service_time_min'], 
+                                                       bar_info['service_time_max']) * self.fps
+        else:
+            # Entra na fila
+            self.states[i] = 6
+            self.in_queue[i] = True
+            if bar_name not in self.current_queues:
+                self.current_queues[bar_name] = []
+            self.current_queues[bar_name].append(i)
+            self.queue_positions[i] = len(self.current_queues[bar_name]) - 1
+    
+    def _arrive_at_toilet(self, i):
+        """Pessoa chega à casa de banho"""
+        toilet_name = self.current_destinations[i]
+        toilet_info = self.boundaries.toilets[toilet_name]
+        
+        if self.facility_occupancy.get(toilet_name, 0) < toilet_info['capacity']:
+            # Entra na casa de banho
+            self.states[i] = 11
+            self.facility_occupancy[toilet_name] += 1
+            self.time_in_facility[i] = np.random.uniform(toilet_info['service_time_min'], 
+                                                       toilet_info['service_time_max']) * self.fps
+        else:
+            # Entra na fila
+            self.states[i] = 10
+            self.in_queue[i] = True
+            if toilet_name not in self.current_queues:
+                self.current_queues[toilet_name] = []
+            self.current_queues[toilet_name].append(i)
+            self.queue_positions[i] = len(self.current_queues[toilet_name]) - 1
+    
+    def _manage_bar_queue(self, i):
+        """Gerencia pessoa na fila do bar"""
+        bar_name = self.current_destinations[i]
+        queue = self.current_queues.get(bar_name, [])
+        
+        if queue and queue[0] == i:
+            if self.facility_occupancy.get(bar_name, 0) < self.boundaries.bars[bar_name]['capacity']:
+                # Sai da fila e entra no bar
+                self.in_queue[i] = False
+                self.states[i] = 7
+                self.facility_occupancy[bar_name] += 1
+                self.current_queues[bar_name].pop(0)
+                self.time_in_facility[i] = np.random.uniform(
+                    self.boundaries.bars[bar_name]['service_time_min'], 
+                    self.boundaries.bars[bar_name]['service_time_max']
+                ) * self.fps
                 
-                if np.random.random() < 0.5:
-                    states[i] = 5
-                    bar_name, bar_pos = boundaries.get_nearest_bar(current_pos)
-                    current_destinations[i] = bar_name
-                    destinations[i] = bar_pos
-                    
-                    event_gen.generate_event("person_left_seat", i,
-                        {"x": float(current_pos[0]), "y": float(current_pos[1])},
-                        {"destination": bar_name, "type": "BAR", "nearest": True})
-                else:
-                    states[i] = 8
-                    toilet_name, toilet_pos = boundaries.get_nearest_toilet(current_pos)
-                    current_destinations[i] = toilet_name
-                    destinations[i] = toilet_pos
-                    
-                    event_gen.generate_event("person_left_seat", i,
-                        {"x": float(current_pos[0]), "y": float(current_pos[1])},
-                        {"destination": toilet_name, "type": "TOILET", "nearest": True})
-
-            if states[i] == 5:
-                direction = destinations[i] - current_pos
-                distance = np.linalg.norm(direction)
+                # Atualizar posições dos outros na fila
+                for j, person_id in enumerate(self.current_queues.get(bar_name, [])):
+                    if person_id < self.num_people:
+                        self.queue_positions[person_id] = j
+    def _manage_toilet_queue(self, i):
+        """Gerencia pessoa na fila da casa de banho"""
+        toilet_name = self.current_destinations[i]
+        queue = self.current_queues.get(toilet_name, [])
+        
+        if queue and queue[0] == i:
+            if self.facility_occupancy.get(toilet_name, 0) < self.boundaries.toilets[toilet_name]['capacity']:
+                # Sai da fila e entra na casa de banho
+                self.in_queue[i] = False
+                self.states[i] = 11
+                self.facility_occupancy[toilet_name] += 1
+                self.current_queues[toilet_name].pop(0)
+                self.time_in_facility[i] = np.random.uniform(
+                    self.boundaries.toilets[toilet_name]['service_time_min'], 
+                    self.boundaries.toilets[toilet_name]['service_time_max']
+                ) * self.fps
                 
-                if distance > 2.0:
-                    step_vector = (direction / distance) * 0.7
-                    new_pos = current_pos + step_vector
-                    
-                    if is_position_valid(new_pos[0], new_pos[1]):
-                        positions[i] = new_pos
-                else:
-                    states[i] = 6
-                    positions[i] = destinations[i].copy()
-                    
-                    event_gen.update_zone_occupancy(current_destinations[i], +1)
-                    
-                    event_gen.generate_event("person_at_bar", i,
-                        {"x": float(positions[i][0]), "y": float(positions[i][1])},
-                        {"bar_name": current_destinations[i], "nearest": True})
-                    
-                    def return_from_bar(person_idx, wait_time):
-                        time.sleep(wait_time)
-                        if person_idx < len(states) and states[person_idx] == 6:
-                            states[person_idx] = 7
-                            destinations[person_idx] = assigned_seats[person_idx].copy()
-                    
-                    wait_time = np.random.uniform(10, 30) / FPS
-                    threading.Thread(target=return_from_bar, args=(i, wait_time), daemon=True).start()
-
-            if states[i] == 7:
-                direction = destinations[i] - current_pos
-                distance = np.linalg.norm(direction)
+                # Atualizar posições dos outros na fila
+                for j, person_id in enumerate(self.current_queues.get(toilet_name, [])):
+                    if person_id < self.num_people:
+                        self.queue_positions[person_id] = j
+    
+    def _manage_bar_service(self, i):
+        """Gerencia tempo no bar"""
+        self.time_in_facility[i] -= 1
+        
+        if self.time_in_facility[i] <= 0:
+            bar_name = self.current_destinations[i]
+            self.facility_occupancy[bar_name] = max(0, self.facility_occupancy[bar_name] - 1)
+            self.states[i] = 8  # Voltando do bar
+            self.destinations[i] = self.assigned_seats[i].copy()
+    
+    def _manage_toilet_service(self, i):
+        """Gerencia tempo na casa de banho"""
+        self.time_in_facility[i] -= 1
+        
+        if self.time_in_facility[i] <= 0:
+            toilet_name = self.current_destinations[i]
+            self.facility_occupancy[toilet_name] = max(0, self.facility_occupancy[toilet_name] - 1)
+            self.states[i] = 12  # Voltando da casa de banho
+            self.destinations[i] = self.assigned_seats[i].copy()
+    
+    def _return_to_seat(self, i):
+        """Pessoa volta ao assento"""
+        direction = self.destinations[i] - self.positions[i]
+        distance = np.linalg.norm(direction)
+        
+        if distance > 1.0:
+            step_vector = (direction / distance) * 0.7
+            new_pos = self.positions[i] + step_vector
+            
+            if self.is_position_valid(new_pos[0], new_pos[1]):
+                self.positions[i] = new_pos
+            else:
+                angle = np.random.uniform(-0.5, 0.5)
+                rotation = np.array([[np.cos(angle), -np.sin(angle)], 
+                                   [np.sin(angle), np.cos(angle)]])
+                self.positions[i] = self.positions[i] + rotation @ step_vector * 0.7
+        else:
+            self.states[i] = 4  # Sentado
+            self.event_gen.update_zone_occupancy(self.assigned_zones[i], +1)
+    
+    def update_heatmap(self, current_time):
+        """Atualiza heatmap"""
+        grid_data = []
+        GRID_RESOLUTION = 5
+        
+        x_cells = int((self.boundaries.stadium_bounds['x_max'] - self.boundaries.stadium_bounds['x_min']) / GRID_RESOLUTION)
+        y_cells = int((self.boundaries.stadium_bounds['y_max'] - self.boundaries.stadium_bounds['y_min']) / GRID_RESOLUTION)
+        
+        for i in range(x_cells):
+            for j in range(y_cells):
+                x_min = self.boundaries.stadium_bounds['x_min'] + i * GRID_RESOLUTION
+                x_max = x_min + GRID_RESOLUTION
+                y_min = self.boundaries.stadium_bounds['y_min'] + j * GRID_RESOLUTION
+                y_max = y_min + GRID_RESOLUTION
                 
-                if distance > 1.0:
-                    step_vector = (direction / distance) * 0.7
-                    new_pos = current_pos + step_vector
-                    
-                    if is_position_valid(new_pos[0], new_pos[1]):
-                        positions[i] = new_pos
-                else:
-                    states[i] = 4
-                    positions[i] = assigned_seats[i].copy()
-                    
-                    if current_destinations[i]:
-                        event_gen.update_zone_occupancy(current_destinations[i], -1)
-                    event_gen.update_zone_occupancy(assigned_zones[i], +1)
-                    
-                    event_gen.generate_event("person_returned_to_seat", i,
-                        {"x": float(positions[i][0]), "y": float(positions[i][1])},
-                        {"seat_id": f"SEAT_{i:04d}", "from": "BAR", "zone": assigned_zones[i]})
-
-            if states[i] == 8:
-                direction = destinations[i] - current_pos
-                distance = np.linalg.norm(direction)
+                count = 0
+                for k in range(self.num_people):
+                    x, y = self.positions[k]
+                    if x_min <= x < x_max and y_min <= y < y_max and self.states[k] not in [0, 14]:
+                        count += 1
                 
-                if distance > 2.0:
-                    step_vector = (direction / distance) * 0.6
-                    new_pos = current_pos + step_vector
-                    
-                    if is_position_valid(new_pos[0], new_pos[1]):
-                        positions[i] = new_pos
-                else:
-                    states[i] = 9
-                    positions[i] = destinations[i].copy()
-                    
-                    event_gen.update_zone_occupancy(current_destinations[i], +1)
-                    
-                    event_gen.generate_event("person_at_toilet", i,
-                        {"x": float(positions[i][0]), "y": float(positions[i][1])},
-                        {"toilet_name": current_destinations[i], "nearest": True})
-                    
-                    def return_from_toilet(person_idx, wait_time):
-                        time.sleep(wait_time)
-                        if person_idx < len(states) and states[person_idx] == 9:
-                            states[person_idx] = 10
-                            destinations[person_idx] = assigned_seats[person_idx].copy()
-                    
-                    wait_time = np.random.uniform(5, 15) / FPS
-                    threading.Thread(target=return_from_toilet, args=(i, wait_time), daemon=True).start()
-
-            if states[i] == 10:
-                direction = destinations[i] - current_pos
-                distance = np.linalg.norm(direction)
+                if count > 0:
+                    center_x = (x_min + x_max) / 2
+                    center_y = (y_min + y_max) / 2
+                    grid_data.append({
+                        "x": center_x,
+                        "y": center_y,
+                        "count": count,
+                        "cell_id": f"cell_{i}_{j}"
+                    })
+        
+        if grid_data:
+            self.event_gen.generate_heatmap_density(grid_data)
+    
+    def get_phase(self, current_time):
+        """Retorna fase atual"""
+        if current_time > self.timeline["game_end"]:
+            return "SAIDA"
+        elif current_time > self.timeline["game_resume"]:
+            return "2a PARTE"
+        elif current_time > self.timeline["half_time"]:
+            return "INTERVALO"
+        elif current_time > self.timeline["game_start"]:
+            return "1a PARTE"
+        elif current_time > self.timeline["pre_game"]:
+            return "PRE-JOGO"
+        else:
+            return "ENTRADA"
+    
+    def run(self):
+        """Executa simulação completa"""
+        print("Iniciando simulacao completa...")
+        print(f"Duracao: {self.duration} segundos")
+        
+        # Setup
+        self.setup_people()
+        
+        # Configurar visualização
+        plt.ion()
+        fig, ax = plt.subplots(figsize=(14, 11))
+        
+        total_steps = self.duration * self.fps  # 300 steps (1 segundo cada)
+        
+        # Contadores para controlar atualizações
+        last_bin_update = 0
+        last_heatmap_update = 0
+        last_gate_update = 0
+        
+        # Loop principal
+        for step in range(total_steps):
+            current_time = step  # Em segundos (1 FPS)
+            
+            # ATUALIZAR FILAS a cada 5 segundos
+            if current_time - self.event_gen.last_queue_update >= 5:
+                self.update_queues(current_time)
+                self.event_gen.last_queue_update = current_time
+            
+            # ATUALIZAR CAIXOTES a cada 10 segundos
+            if current_time - last_bin_update >= 10:
+                self.update_bins(current_time)
+                last_bin_update = current_time
+            
+            # ATUALIZAR HEATMAP a cada 15 segundos
+            if current_time - last_heatmap_update >= 15:
+                self.update_heatmap(current_time)
+                last_heatmap_update = current_time
+            
+            # GERAR EVENTOS DE PORTÃO ALEATÓRIOS durante entrada (primeiros 60s)
+            if current_time < self.timeline["pre_game"] and current_time - last_gate_update >= 2:
+                # Evento aleatório de entrada
+                if np.random.random() < 0.3:  # 30% de chance a cada 2 segundos
+                    gate_name = np.random.choice(list(self.boundaries.gates.keys()))
+                    person_id = np.random.randint(0, self.num_people)
+                    self.event_gen.generate_gate_event(gate_name, person_id, direction="entry")
+                    last_gate_update = current_time
+            
+            # GERAR EVENTOS DE SAÍDA no final (últimos 70s)
+            if current_time > self.timeline["game_end"] and current_time - last_gate_update >= 5:
+                # Evento aleatório de saída
+                if np.random.random() < 0.2:  # 20% de chance a cada 5 segundos
+                    gate_name = np.random.choice(list(self.boundaries.gates.keys()))
+                    person_id = np.random.randint(0, self.num_people)
+                    self.event_gen.generate_gate_event(gate_name, person_id, direction="exit")
+                    last_gate_update = current_time
+            
+            # Atualizar pessoas
+            self.update_people(current_time)
+            
+            # Atualizar visualização a cada 2 segundos
+            if step % 2 == 0:
+                self._update_visualization(ax, fig, current_time)
+            
+            # Mostrar progresso a cada 30 segundos
+            if step % 30 == 0:
+                phase = self.get_phase(current_time)
+                seated = np.sum(self.states == 4)
+                in_bar_queue = np.sum(self.states == 6)
+                in_toilet_queue = np.sum(self.states == 10)
+                at_bars = np.sum(self.states == 7)
+                at_toilets = np.sum(self.states == 11)
                 
-                if distance > 1.0:
-                    step_vector = (direction / distance) * 0.6
-                    new_pos = current_pos + step_vector
-                    
-                    if is_position_valid(new_pos[0], new_pos[1]):
-                        positions[i] = new_pos
-                else:
-                    states[i] = 4
-                    positions[i] = assigned_seats[i].copy()
-                    
-                    if current_destinations[i]:
-                        event_gen.update_zone_occupancy(current_destinations[i], -1)
-                    event_gen.update_zone_occupancy(assigned_zones[i], +1)
-                    
-                    event_gen.generate_event("person_returned_to_seat", i,
-                        {"x": float(positions[i][0]), "y": float(positions[i][1])},
-                        {"seat_id": f"SEAT_{i:04d}", "from": "TOILET", "zone": assigned_zones[i]})
-
-            if current_time > TIMELINE["game_end"] and states[i] == 4:
-                states[i] = 11
-                exit_gate_name, exit_gate_pos = boundaries.get_nearest_gate(current_pos)
-                current_destinations[i] = exit_gate_name
-                destinations[i] = exit_gate_pos
+                print(f"\n[{current_time:03d}s - {phase}]")
+                print(f"  Sentados: {seated:3d} | Bares: {at_bars:2d} ({in_bar_queue:2d} fila) | WC: {at_toilets:2d} ({in_toilet_queue:2d} fila)")
+            
+            # Pequena pausa para não sobrecarregar
+            time.sleep(0.05)
+        
+        # Finalizar
+        plt.ioff()
+        plt.close()
+        
+        # Gerar eventos finais de evacuação
+        print("\nGerando eventos de evacuação...")
+        for i in range(self.num_people):
+            gate_name = self.entry_gates[i]
+            self.event_gen.generate_gate_event(gate_name, i, direction="exit")
+            time.sleep(0.01)  # Pequena pausa para não sobrecarregar o broker
+        
+        # Salvar resultados
+        self._save_results()
+        
+        print("\nSimulacao concluida")
+        
+        # Estatísticas finais
+        broker_stats = self.mqtt_client.get_stats() if hasattr(self.mqtt_client, 'get_stats') else {'messages_count': 0}
+        total_bar_queue = sum(len(q) for q in self.current_queues.values() 
+                            if any(k in self.boundaries.bars for k in self.current_queues.keys()))
+        total_toilet_queue = sum(len(q) for q in self.current_queues.values() 
+                                if any(k in self.boundaries.toilets for k in self.current_queues.keys()))
+        
+        print(f"\nEstatisticas finais:")
+        print(f"  Pessoas: {self.num_people}")
+        print(f"  Eventos gerados: {self.event_gen.event_count}")
+        print(f"  Mensagens MQTT: {broker_stats.get('messages_count', 0)}")
+        print(f"  Filas bares (final): {total_bar_queue}")
+        print(f"  Filas WC (final): {total_toilet_queue}")
+        
+        # Desconectar do MQTT
+        try:
+            self.mqtt_client.disconnect()
+        except:
+            pass
+    
+    def _update_visualization(self, ax, fig, current_time):
+        """Atualiza visualização com imagem"""
+        ax.clear()
+        
+        # Mostrar imagem do estádio
+        if self.use_image:
+            ax.imshow(self.stadium_img, extent=self.img_extent, aspect='equal')
+        else:
+            ax.set_facecolor('#003366')
+            # Desenhar estádio simples
+            stadium_rect = plt.Rectangle((-60, -45), 120, 90,
+                                       fill=False, edgecolor='white', linewidth=3)
+            ax.add_patch(stadium_rect)
+            
+            # Campo
+            field_rect = plt.Rectangle((-8, -8), 16, 10,
+                                     facecolor='darkgreen', alpha=0.7, edgecolor='red', linewidth=2)
+            ax.add_patch(field_rect)
+            
+            # Bares
+            for bar_name, bar_info in self.boundaries.bars.items():
+                bar_rect = plt.Rectangle(
+                    (bar_info['x_min'], bar_info['y_min']),
+                    bar_info['x_max'] - bar_info['x_min'],
+                    bar_info['y_max'] - bar_info['y_min'],
+                    fill=True, color='red', alpha=0.4, edgecolor='darkred', linewidth=2
+                )
+                ax.add_patch(bar_rect)
                 
-                event_gen.update_zone_occupancy(assigned_zones[i], -1)
+                # Mostrar ocupação
+                count = self.facility_occupancy.get(bar_name, 0)
+                queue = len(self.current_queues.get(bar_name, []))
+                ax.text(bar_info['center'][0], bar_info['center'][1], 
+                       f"BAR\n{count}/{bar_info['capacity']}\nF:{queue}",
+                       ha='center', va='center', color='white', fontsize=8,
+                       bbox=dict(boxstyle="round,pad=0.2", facecolor='red', alpha=0.7))
+            
+            # Banheiros
+            for toilet_name, toilet_info in self.boundaries.toilets.items():
+                toilet_rect = plt.Rectangle(
+                    (toilet_info['x_min'], toilet_info['y_min']),
+                    toilet_info['x_max'] - toilet_info['x_min'],
+                    toilet_info['y_max'] - toilet_info['y_min'],
+                    fill=True, color='blue', alpha=0.3, edgecolor='darkblue', linewidth=1
+                )
+                ax.add_patch(toilet_rect)
                 
-                event_gen.generate_event("person_leaving_stadium", i,
-                    {"x": float(current_pos[0]), "y": float(current_pos[1])},
-                    {"exit_gate": exit_gate_name})
-
-            if states[i] == 11:
-                direction = destinations[i] - current_pos
-                distance = np.linalg.norm(direction)
-                
-                if distance > 2.0:
-                    step_vector = (direction / distance) * 0.9
-                    new_pos = current_pos + step_vector
-                    
-                    if is_position_valid(new_pos[0], new_pos[1]):
-                        positions[i] = new_pos
-                else:
-                    states[i] = 12
-                    positions[i] = destinations[i].copy()
-                    
-                    event_gen.generate_gate_event(current_destinations[i], i, direction="exit")
-                    
-                    event_gen.generate_event("person_exited_stadium", i,
-                        {"x": float(positions[i][0]), "y": float(positions[i][1])},
-                        {"exit_gate": current_destinations.get(i, "UNKNOWN")})
-
-        # ========== VISUALIZAÇÃO ==========
+                count = self.facility_occupancy.get(toilet_name, 0)
+                queue = len(self.current_queues.get(toilet_name, []))
+                ax.text(toilet_info['center'][0], toilet_info['center'][1], 
+                       f"WC\n{count}/{toilet_info['capacity']}\nF:{queue}",
+                       ha='center', va='center', color='white', fontsize=7,
+                       bbox=dict(boxstyle="round,pad=0.2", facecolor='blue', alpha=0.6))
+        
+        ax.axis('off')
+        ax.set_xlim(self.img_extent[0], self.img_extent[1])
+        ax.set_ylim(self.img_extent[2], self.img_extent[3])
+        
+        # Título
+        phase = self.get_phase(current_time)
+        ax.set_title(f"ESTADIO DO DRAGAO - {phase} - {current_time:.0f}s - {self.num_people} PESSOAS",
+                    fontsize=16, color="white", backgroundcolor="#000080", pad=20)
+        
+        # Plotar pessoas
         colors = {
-            3: 'cyan', 4: 'lime', 5: 'red', 6: 'magenta', 7: 'orange',
-            8: 'purple', 9: 'pink', 10: 'brown', 11: 'yellow', 12: 'gray'
+            3: 'cyan', 4: 'lime', 5: 'red', 6: 'darkred', 7: 'magenta', 8: 'orange',
+            9: 'purple', 10: 'darkblue', 11: 'pink', 12: 'brown', 13: 'yellow', 14: 'gray'
         }
         
         labels = {
-            3: 'Indo lugar', 4: 'Sentado', 5: 'Indo bar', 6: 'No bar', 7: 'Voltando bar',
-            8: 'Indo WC', 9: 'No WC', 10: 'Voltando WC', 11: 'Saindo', 12: 'Saiu'
+            3: 'Indo lugar', 4: 'Sentado', 5: 'Indo bar', 6: 'Fila bar', 7: 'No bar',
+            8: 'Voltando bar', 9: 'Indo WC', 10: 'Fila WC', 11: 'No WC', 
+            12: 'Voltando WC', 13: 'Saindo', 14: 'Saiu'
         }
         
-        start_array = np.array(START_POSITIONS)
-        ax.scatter(start_array[:, 0], start_array[:, 1], 
-                  c='yellow', s=30, alpha=0.5, marker='x', label='Posições Iniciais')
+        # Mostrar pessoas em fila
+        for i in range(self.num_people):
+            if self.in_queue[i]:
+                ax.plot(self.positions[i][0], self.positions[i][1], 'o', 
+                       color='white', markersize=8, markeredgecolor='black', linewidth=0.5)
         
-        seat_positions = np.array(list(assigned_seats.values()))
-        ax.scatter(seat_positions[:, 0], seat_positions[:, 1], 
-                  c='blue', s=15, alpha=0.3, marker='s', label='Cadeiras')
-        
+        # Plotar por estado
         for state, color in colors.items():
-            indices = (states == state) & (states != 12)
+            indices = (self.states == state) & (self.states != 14) & (~self.in_queue)
             if np.any(indices):
-                ax.scatter(positions[indices, 0], positions[indices, 1], 
-                          c=color, s=40, label=labels[state], edgecolors='black', linewidth=0.5)
-
-        ax.legend(loc='upper left', fontsize=8)
+                ax.scatter(self.positions[indices, 0], self.positions[indices, 1], 
+                          c=color, s=30, label=labels[state], edgecolors='black', linewidth=0.5)
+        
+        # Estatísticas
+        people_in_queue = np.sum(self.in_queue)
+        people_at_bars = np.sum(self.states == 7)
+        people_at_toilets = np.sum(self.states == 11)
+        
+        stats_text = (f"Total: {self.num_people} pessoas\n"
+                     f"Em fila: {people_in_queue}\n"
+                     f"Nos bares: {people_at_bars}\n"
+                     f"Nos banheiros: {people_at_toilets}\n"
+                     f"Sentados: {np.sum(self.states == 4)}\n"
+                     f"Eventos: {self.event_gen.event_count}")
+        
+        ax.text(self.img_extent[0] + 5, self.img_extent[3] - 15, stats_text,
+                fontsize=9, color='white', verticalalignment='top',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor='black', alpha=0.7))
+        
+        # Legenda
+        ax.legend(loc='upper left', fontsize=8, ncol=3)
+        
         plt.draw()
         plt.pause(0.01)
 
-    plt.ioff()
-    plt.show()
+    def _convert_numpy_types(self, obj):
+        """
+        Converte tipos numpy (int32, int64, float32, etc.) para tipos Python nativos.
+        """
+        import numpy as np
+        
+        if isinstance(obj, dict):
+            return {key: self._convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_numpy_types(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._convert_numpy_types(item) for item in obj)
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif hasattr(obj, '__dict__'):  # Para objetos
+            return self._convert_numpy_types(obj.__dict__)
+        else:
+            return obj
+    
+    def _save_results(self):
+        """Salva as estatísticas da simulação em arquivo JSON"""
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+        
+        stats = {
+            'total_people': self.total_people,
+            'simulation_duration': self.simulation_duration,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'events': self.event_log,
+            'queue_data': self.queue_data_log,
+            'phase_changes': self.phase_changes,
+            'final_state': {
+                'seated': self.seated_count,
+                'at_bars': self.at_bars_count,
+                'at_wc': self.at_wc_count,
+                'in_queue_bars': self.queue_bars_count,
+                'in_queue_wc': self.queue_wc_count,
+                'exited': self.exited_count
+            }
+        }
+        
+        # Converter tipos numpy para tipos Python nativos
+        stats = self._convert_numpy_types(stats)
+        
+        filename = os.path.join(self.output_dir, f"simulation_{int(time.time())}.json")
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, indent=2, ensure_ascii=False)
+        
+        print(f"Resultados salvos em {filename}")
 
-    os.makedirs("../outputs", exist_ok=True)
-    with open("../outputs/stadium_events.json", "w", encoding="utf-8") as f:
-        json.dump(event_gen.events, f, indent=2, ensure_ascii=False)
-
-    print(f"\n✅ SIMULAÇÃO CONCLUÍDA!")
-    print(f"📊 Total de eventos gerados: {event_gen.event_count}")
-    print(f"📁 Eventos salvos em: ../outputs/stadium_events.json")
-    print(f"\n📈 ESTATÍSTICAS:")
-    print(f"   - Pessoas que entraram: {n_pedestrians}")
-    print(f"   - Pessoas que saíram: {np.sum(states == 12)}")
-    print(f"   - Bins acima de 85%: {sum(1 for v in event_gen.bin_fill_levels.values() if v > 85)}")
-    if fire_alarm_triggered:
-        print(f"   - Alarme de incêndio ativado: SIM")
-    else:
-        print(f"   - Alarme de incêndio ativado: NÃO")
+def main():
+    """Função principal"""
+    try:
+        simulation = StadiumSimulation(num_people=300, duration=300)
+        simulation.run()
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\nSimulacao interrompida pelo utilizador")
+        return 1
+    except Exception as e:
+        print(f"\nErro na simulacao: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
 if __name__ == "__main__":
-    run_stadium_simulation()
+    main()

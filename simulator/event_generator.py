@@ -8,7 +8,7 @@ from datetime import datetime
 from collections import defaultdict
 
 # Tópicos MQTT
-from mqtt_broker import MQTT_TOPIC_ALL_EVENTS, MQTT_TOPIC_QUEUES, MQTT_TOPIC_MAINTENANCE, MQTT_TOPIC_HEATMAP
+from mqtt_broker import MQTT_TOPIC_ALL_EVENTS, MQTT_TOPIC_QUEUES, MQTT_TOPIC_MAINTENANCE, MQTT_TOPIC_HEATMAP, MQTT_TOPIC_ALERTS, MQTT_TOPIC_SECURITY
 
 class EventGenerator:
     """Gerador completo de eventos"""
@@ -163,9 +163,7 @@ class EventGenerator:
                 "service_capacity_per_min": service_capacity
             }
         }
-        
-        print(f"Evento FILA enviado: {location_id} - {queue_length} pessoas, {wait_time_min:.1f} min espera")
-        
+                
         self.events.append(event)
         self.mqtt_client.publish(MQTT_TOPIC_ALL_EVENTS, json.dumps(event))
         self.mqtt_client.publish(MQTT_TOPIC_QUEUES, json.dumps(event))
@@ -193,6 +191,31 @@ class EventGenerator:
         self.event_count += 1
         return event
     
+    def generate_fire_alert(self, location_id, location, zones, severity="high"):
+        """Gera um alerta crítico de incêndio"""
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "event_type": "fire_alert",
+            "timestamp": datetime.now().isoformat() + "Z",
+            "location_id": location_id,
+            "location": {"x": float(location[0]), "y": float(location[1])},
+            "severity": severity,
+            "metadata": {
+                "action_required": "activate_emergency_protocol",
+                "description": f"Incêndio detectado em {location_id} - prioridade máxima!",
+                "evacuation_needed": True,
+                "affected_areas": zones
+            }
+        }
+                
+        self.events.append(event)
+        self.mqtt_client.publish(MQTT_TOPIC_ALL_EVENTS, json.dumps(event))
+        self.mqtt_client.publish(MQTT_TOPIC_ALERTS, json.dumps(event))
+        self.mqtt_client.publish(MQTT_TOPIC_SECURITY, json.dumps(event))
+        
+        self.event_count += 1
+        return event
+
     def update_zone_occupancy(self, zone_id, delta):
         """Atualiza contador de ocupação de zona"""
         self.zone_counters[zone_id] += delta

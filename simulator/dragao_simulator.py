@@ -11,10 +11,9 @@ import threading
 from datetime import datetime
 from collections import defaultdict
 
-# Mantemos a mesma importação
-from mqtt_broker import StadiumMQTTClient, get_broker
+from mqtt_broker import StadiumMQTTClient
 from stadium_boundaries import StadiumBoundaries
-from event_generator import EventGenerator, MQTT_TOPIC_ALL_EVENTS, MQTT_TOPIC_QUEUES
+from event_generator import EventGenerator
 
 print("\n" + "="*60)
 print("ESTADIO DO DRAGAO - SIMULADOR COMPLETO")
@@ -22,7 +21,7 @@ print("="*60)
 
 class StadiumSimulation:
     """Simulação completa do estádio"""
-    def __init__(self, num_people=300, duration=350):
+    def __init__(self, num_people=300, duration=1800):
         self.output_dir = "../outputs"
         self.num_people = num_people
         self.duration = duration
@@ -42,6 +41,7 @@ class StadiumSimulation:
         self.queue_bars_count = 0
         self.queue_wc_count = 0
         self.exited_count = 0
+        self.fire_alert_triggered = False
         
         print("Tentando conectar ao Mosquitto MQTT Broker...")
         
@@ -112,12 +112,12 @@ class StadiumSimulation:
         
         # Timeline
         self.timeline = {
-            "pre_game": 60, 
-            "game_start": 120, 
-            "half_time": 180, 
-            "game_resume": 240, 
-            "game_end": 280,
-            "evacuation_complete": 350
+            "pre_game": 100, 
+            "game_start": 200, 
+            "half_time": 800, 
+            "game_resume": 1000, 
+            "game_end": 1600,
+            "evacuation_complete": 1800
         }
         
         # Carregar imagem
@@ -263,6 +263,34 @@ class StadiumSimulation:
                 self.event_gen.generate_bin_overflow_alert(bin_id, bin_pos)
             
             self.event_gen.bin_fill_levels[bin_id] = fill_percentage
+
+    def _process_exit_movement(self, i):
+        """Processa o movimento de saída"""
+        direction = self.destinations[i] - self.positions[i]
+        distance = np.linalg.norm(direction)
+        
+        if distance > 2.0:  # Ainda não chegou ao portão
+            step_vector = (direction / distance) * 0.5  # Velocidade normal
+            new_pos = self.positions[i] + step_vector
+            
+            if self.is_position_valid(new_pos[0], new_pos[1]):
+                self.positions[i] = new_pos
+            else:
+                # Tentar caminho alternativo
+                angle = np.random.uniform(-0.3, 0.3)
+                rotation = np.array([[np.cos(angle), -np.sin(angle)], 
+                                   [np.sin(angle), np.cos(angle)]])
+                self.positions[i] = self.positions[i] + rotation @ step_vector * 0.8
+        else:
+            # Chegou ao portão - sair completamente
+            self.states[i] = 14  # Estado: saiu
+            gate_name = self.current_destinations[i]
+            
+            # Gerar evento de passagem pelo portão (saída)
+            self.event_gen.generate_gate_event(gate_name, i, direction="exit")
+            
+            # Atualizar contador
+            self.exited_count += 1
     
     def update_people(self, current_time):
         """Atualiza todas as pessoas"""
@@ -275,7 +303,7 @@ class StadiumSimulation:
                 distance = np.linalg.norm(direction)
                 
                 if distance > 1.0:
-                    step_vector = (direction / distance) * 0.8
+                    step_vector = (direction / distance) * 0.4
                     new_pos = current_pos + step_vector
                     
                     if self.is_position_valid(new_pos[0], new_pos[1]):
@@ -296,20 +324,21 @@ class StadiumSimulation:
                 # No intervalo
                 if self.timeline["half_time"] <= current_time < self.timeline["game_resume"]:
                     # Ir ao bar
-                    if current_time >= self.service_times_bar[i] and np.random.random() < 0.1 and time_since_last > 120:
+                    if current_time >= self.service_times_bar[i] and np.random.random() < 0.05:
                         self._go_to_bar(i)
                     # Ir à casa de banho
-                    elif np.random.random() < 0.05 and time_since_last > 120:
+                    elif np.random.random() < 0.03:
                         self._go_to_toilet(i)
                 # Durante o jogo
-                elif time_since_last > 180 and np.random.random() < 0.01:
+                elif time_since_last > 180 and np.random.random() < 0.02:
                     self._go_to_toilet(i)
-            
+                elif time_since_last > 300 and np.random.random() < 0.01:
+                    self._go_to_bar(i)
             # Estados de movimento
             elif self.states[i] == 5:  # Indo ao bar
-                self._move_to_service(i, 0.7)
+                self._move_to_service(i, 0.4)
             elif self.states[i] == 9:  # Indo à casa de banho
-                self._move_to_service(i, 0.7)
+                self._move_to_service(i, 0.4)
             
             # Estados em fila
             elif self.states[i] == 6:  # Fila do bar
@@ -328,6 +357,8 @@ class StadiumSimulation:
                 self._return_to_seat(i)
             elif self.states[i] == 12:  # Voltando da casa de banho
                 self._return_to_seat(i)
+            elif self.states[i] == 13:
+                self._process_exit_movement(i) # Saindo do estádio
     
     def _go_to_bar(self, i):
         """Pessoa decide ir ao bar"""
@@ -492,6 +523,39 @@ class StadiumSimulation:
         else:
             self.states[i] = 4  # Sentado
             self.event_gen.update_zone_occupancy(self.assigned_zones[i], +1)
+
+    def _initiate_exit(self, i):
+        """Inicia o processo de saída para uma pessoa"""
+        if self.states[i] in [13, 14]:  # Já está saindo ou saiu
+            return
+        
+        # Encontrar o portão de saída (usar o mesmo de entrada)
+        gate_name = self.entry_gates.get(i, None)
+        if not gate_name:
+            gate_name, _ = self.boundaries.get_nearest_gate(self.positions[i])
+        
+        gate_pos = self.boundaries.gates[gate_name]
+        
+        # Mudar estado para "saindo"
+        self.states[i] = 13  # Estado de saída
+        self.destinations[i] = np.array(gate_pos)
+        self.current_destinations[i] = gate_name
+        
+        # Remover da contagem da zona
+        if i in self.assigned_zones:
+            self.event_gen.update_zone_occupancy(self.assigned_zones[i], -1)
+        
+        # Gerar evento de início de saída
+        self.event_gen.generate_event(
+            event_type="exit_started",
+            person_id=i,
+            location=[float(self.positions[i][0]), float(self.positions[i][1])],
+            metadata={
+                "gate": gate_name,
+                "from_zone": self.assigned_zones.get(i, "unknown"),
+                "exit_reason": "game_ended"
+            }
+        )
     
     def update_heatmap(self, current_time):
         """Atualiza heatmap"""
@@ -554,59 +618,85 @@ class StadiumSimulation:
         plt.ion()
         fig, ax = plt.subplots(figsize=(14, 11))
         
-        total_steps = self.duration * self.fps  # 300 steps (1 segundo cada)
+        total_steps = self.duration * self.fps  # 1800 steps
         
-        # Contadores para controlar atualizações
+        # Contadores para controlar atualizações - Aumentados para menor frequência
         last_bin_update = 0
         last_heatmap_update = 0
         last_gate_update = 0
         
         # Loop principal
         for step in range(total_steps):
-            current_time = step  # Em segundos (1 FPS)
+            current_time = step  # Em segundos
             
-            # ATUALIZAR FILAS a cada 5 segundos
-            if current_time - self.event_gen.last_queue_update >= 5:
+            # ATUALIZAR FILAS a cada 10 segundos (aumentado de 5)
+            if current_time - self.event_gen.last_queue_update >= 10:
                 self.update_queues(current_time)
                 self.event_gen.last_queue_update = current_time
             
-            # ATUALIZAR CAIXOTES a cada 10 segundos
-            if current_time - last_bin_update >= 10:
+            # ATUALIZAR CAIXOTES a cada 30 segundos (aumentado de 10)
+            if current_time - last_bin_update >= 30:
                 self.update_bins(current_time)
                 last_bin_update = current_time
             
-            # ATUALIZAR HEATMAP a cada 15 segundos
-            if current_time - last_heatmap_update >= 15:
+            # ATUALIZAR HEATMAP a cada 30 segundos (aumentado de 15)
+            if current_time - last_heatmap_update >= 30:
                 self.update_heatmap(current_time)
                 last_heatmap_update = current_time
             
-            # GERAR EVENTOS DE PORTÃO ALEATÓRIOS durante entrada (primeiros 60s)
-            if current_time < self.timeline["pre_game"] and current_time - last_gate_update >= 2:
-                # Evento aleatório de entrada
-                if np.random.random() < 0.3:  # 30% de chance a cada 2 segundos
+            # GERAR EVENTOS DE PORTÃO ALEATÓRIOS durante entrada (primeiros 60s) - A cada 5s em vez de 2
+            if current_time < self.timeline["pre_game"] and current_time - last_gate_update >= 5:
+                if np.random.random() < 0.3:
                     gate_name = np.random.choice(list(self.boundaries.gates.keys()))
                     person_id = np.random.randint(0, self.num_people)
                     self.event_gen.generate_gate_event(gate_name, person_id, direction="entry")
                     last_gate_update = current_time
             
-            # GERAR EVENTOS DE SAÍDA no final (últimos 70s)
-            if current_time > self.timeline["game_end"] and current_time - last_gate_update >= 5:
-                # Evento aleatório de saída
-                if np.random.random() < 0.2:  # 20% de chance a cada 5 segundos
+            # GERAR EVENTOS DE SAÍDA no final - A cada 10s em vez de 5
+            if current_time > self.timeline["game_end"] and current_time - last_gate_update >= 10:
+                if np.random.random() < 0.2:
                     gate_name = np.random.choice(list(self.boundaries.gates.keys()))
                     person_id = np.random.randint(0, self.num_people)
                     self.event_gen.generate_gate_event(gate_name, person_id, direction="exit")
                     last_gate_update = current_time
+
+            if current_time > self.timeline["game_end"]:
+                # Para cada pessoa, verificar se já está sentada e iniciar saída
+                for i in range(self.num_people):
+                    if self.states[i] == 4:  # Apenas pessoas sentadas
+                        # Verificar se já passou tempo suficiente desde o início da saída
+                        time_since_end = current_time - self.timeline["game_end"]
+                        
+                        # Probabilidade aumenta com o tempo
+                        exit_probability = min(0.1, time_since_end / 5000)
+                        
+                        if np.random.random() < exit_probability:
+                            # Iniciar processo de saída
+                            self._initiate_exit(i)
+            
+            # Dispara um único alerta de incêndio aos 900 segundos
+            if current_time >= 900 and not self.fire_alert_triggered:
+                possible_locations = ["zona_central"]
+                location_id = np.random.choice(possible_locations)
+                
+                if location_id in self.boundaries.bars:
+                    loc = self.boundaries.bars[location_id]['center']
+                elif location_id in self.boundaries.toilets:
+                    loc = self.boundaries.toilets[location_id]['center']
+                else:
+                    loc = [0, -3]
+                
+                self.event_gen.generate_fire_alert(location_id, loc,possible_locations, severity="high")
+                self.fire_alert_triggered = True
             
             # Atualizar pessoas
             self.update_people(current_time)
             
-            # Atualizar visualização a cada 2 segundos
-            if step % 2 == 0:
-                self._update_visualization(ax, fig, current_time)
+            # Atualizar visualização a cada step (removido %2 para fluidez, tempo avança 1s por step)
+            self._update_visualization(ax, fig, current_time)
             
-            # Mostrar progresso a cada 30 segundos
-            if step % 30 == 0:
+            # Mostrar progresso a cada 60 segundos (aumentado de 30 para menos output)
+            if step % 60 == 0:
                 phase = self.get_phase(current_time)
                 seated = np.sum(self.states == 4)
                 in_bar_queue = np.sum(self.states == 6)
@@ -617,8 +707,8 @@ class StadiumSimulation:
                 print(f"\n[{current_time:03d}s - {phase}]")
                 print(f"  Sentados: {seated:3d} | Bares: {at_bars:2d} ({in_bar_queue:2d} fila) | WC: {at_toilets:2d} ({in_toilet_queue:2d} fila)")
             
-            # Pequena pausa para não sobrecarregar
-            time.sleep(0.05)
+            # Pausa maior para simulação mais lenta em tempo real (0.1s por step simulada)ss
+            time.sleep(0.1)
         
         # Finalizar
         plt.ioff()
@@ -629,7 +719,7 @@ class StadiumSimulation:
         for i in range(self.num_people):
             gate_name = self.entry_gates[i]
             self.event_gen.generate_gate_event(gate_name, i, direction="exit")
-            time.sleep(0.01)  # Pequena pausa para não sobrecarregar o broker
+            time.sleep(0.01)
         
         # Salvar resultados
         self._save_results()
@@ -639,9 +729,9 @@ class StadiumSimulation:
         # Estatísticas finais
         broker_stats = self.mqtt_client.get_stats() if hasattr(self.mqtt_client, 'get_stats') else {'messages_count': 0}
         total_bar_queue = sum(len(q) for q in self.current_queues.values() 
-                            if any(k in self.boundaries.bars for k in self.current_queues.keys()))
+                              if any(k in self.boundaries.bars for k in self.current_queues.keys()))
         total_toilet_queue = sum(len(q) for q in self.current_queues.values() 
-                                if any(k in self.boundaries.toilets for k in self.current_queues.keys()))
+                                 if any(k in self.boundaries.toilets for k in self.current_queues.keys()))
         
         print(f"\nEstatisticas finais:")
         print(f"  Pessoas: {self.num_people}")
@@ -823,7 +913,7 @@ class StadiumSimulation:
 def main():
     """Função principal"""
     try:
-        simulation = StadiumSimulation(num_people=300, duration=300)
+        simulation = StadiumSimulation(num_people=300, duration=1800)
         simulation.run()
         
         return 0

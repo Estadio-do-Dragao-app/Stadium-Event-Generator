@@ -1,10 +1,17 @@
 """
 Simulador principal do Estádio do Dragão.
 """
+import os
+
+# Configurar matplotlib para modo headless se em ambiente Docker
+if os.getenv('DISPLAY_MODE', 'gui') == 'headless':
+    import matplotlib
+    matplotlib.use('Agg')  # Backend sem interface gráfica
+    print("Modo headless ativado - sem interface gráfica")
+
 from matplotlib.image import imread
 import numpy as np
 import matplotlib.pyplot as plt
-import os
 import json
 import time
 import threading
@@ -550,8 +557,12 @@ class StadiumSimulation:
         # Setup
         self.setup_people()
         
-        # Configurar visualização
-        plt.ion()
+        # Configurar visualização (apenas se não estiver em modo headless)
+        headless_mode = os.getenv('DISPLAY_MODE', 'gui') == 'headless'
+        
+        if not headless_mode:
+            plt.ion()
+        
         fig, ax = plt.subplots(figsize=(14, 11))
         
         total_steps = self.duration * self.fps  # 300 steps (1 segundo cada)

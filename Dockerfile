@@ -4,7 +4,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -27,5 +27,8 @@ RUN mkdir -p outputs
 # Set Python path
 ENV PYTHONPATH=/app
 
+# Set working directory to simulator folder where the code expects to run
+WORKDIR /app/simulator
+
 # Default command
-CMD ["python", "simulator/dragao_simulator.py"]
+CMD ["python", "dragao_simulator.py"]

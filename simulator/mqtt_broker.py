@@ -11,11 +11,11 @@ from collections import defaultdict
 
 # TÓPICOS MQTT (mantemos os mesmos)
 MQTT_TOPIC_ALL_EVENTS = "stadium/events/all"
-MQTT_TOPIC_HEATMAP = "stadium/services/congestion"
-MQTT_TOPIC_QUEUES = "stadium/services/queues"
-MQTT_TOPIC_MAINTENANCE = "stadium/services/maintenance"
-MQTT_TOPIC_SECURITY = "stadium/services/security"
-MQTT_TOPIC_ALERTS = "stadium/services/alerts"
+MQTT_TOPIC_HEATMAP = "stadium/events/congestion"
+MQTT_TOPIC_QUEUES = "stadium/events/queues"
+MQTT_TOPIC_MAINTENANCE = "stadium/events/maintenance"
+MQTT_TOPIC_SECURITY = "stadium/events/security"
+MQTT_TOPIC_ALERTS = "stadium/events/alerts"
 
 class StadiumMQTTClient:
     """Cliente MQTT para Mosquitto Broker - mesma interface do antigo"""

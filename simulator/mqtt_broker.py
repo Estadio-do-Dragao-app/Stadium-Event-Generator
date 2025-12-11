@@ -3,6 +3,7 @@ Cliente MQTT para conectar ao broker Mosquitto.
 """
 import json
 import time
+import os
 import paho.mqtt.client as mqtt
 from datetime import datetime
 import threading
@@ -55,9 +56,9 @@ class StadiumMQTTClient:
         self.client.on_publish = self._on_publish
         self.client.on_subscribe = self._on_subscribe
         
-        # Configurações de conexão
-        self.broker_host = "localhost"
-        self.broker_port = 1883
+        # Configurações de conexão (suporte para Docker)
+        self.broker_host = os.getenv("MQTT_BROKER_HOST", "localhost")
+        self.broker_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
         self.keepalive = 60
         
         print(f"Cliente MQTT criado: {self.client_id}")

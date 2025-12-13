@@ -6,3 +6,4 @@ pandas
 numba==0.58.1
 opencv-python
 tqdm
+requests

@@ -1,302 +1,409 @@
 """
-Define a estrutura completa do estádio.
+Define a estrutura completa do estádio usando sistema elíptico do Map-Service.
+Baseado em: node/Map-Service/load_data_db.py
 """
 import numpy as np
+import math
 
 class StadiumBoundaries:
     def __init__(self):
-        # FORMATO VISUAL (retângulo 120×90)
-        self.stadium_bounds = {'x_min': -60, 'x_max': 60, 'y_min': -45, 'y_max': 45}
+        # ==================== CONFIGURAÇÃO CALIBRADA ====================
+        # Imagem: 1481×945 pixels
+        self.IMG_WIDTH = 1481
+        self.IMG_HEIGHT = 945
         
-        # RESTRIÇÕES:
-        self.stadium_center = [0, -3]
-        self.stadium_radius = 40
+        # --- CONFIGURAÇÃO ELÍPTICA ---
+        # Aspect Ratio Global (Y/X) calculado: 0.701
+        self.ELLIPSE_RATIO = 0.701
+    
+        # Centros Calibrados
+        self.CENTER_X_L0 = 746.1
+        self.CENTER_Y_L0 = 480.6
+        self.CENTER_X_L1 = 707.4
+        self.CENTER_Y_L1 = 466.8
         
-        # CAMPO (no centro, fora dos limites para pessoas)
-        self.field_x_min = -8
-        self.field_x_max = 8
-        self.field_y_min = -8
-        self.field_y_max = 2
+        # Compatibilidade com código antigo (usa L0 como default)
+        self.CENTER_X = self.CENTER_X_L0
+        self.CENTER_Y = self.CENTER_Y_L0
         
-        # PORTÕES (fora do estádio)
-        self.gates = {
-            'GATE_NORTH': [-4.8, 45.2],    # Norte
-            'GATE_SOUTH': [0.2, -48.3],   # Sul
+        # Raios de referência (Mantidos para lógica de gates/corredores)
+        # Raios de referência (Ajustados para acompanhar as bancadas R_out ~360)
+        self.OUTER_PERIMETER_X = 390 # Gates ficam aqui
+        self.OUTER_PERIMETER_Y = 390 * self.ELLIPSE_RATIO
+        
+        self.CORRIDOR_INNER_X = 370 # Bares/WCs ficam aqui
+        self.CORRIDOR_INNER_Y = 370 * self.ELLIPSE_RATIO
+        
+        # Corredores calculados
+        self.CORRIDOR_OUTER_X = 380
+        self.CORRIDOR_OUTER_Y = 380 * self.ELLIPSE_RATIO
+        
+        self.CORRIDOR_MID_X = 375
+        self.CORRIDOR_MID_Y = 375 * self.ELLIPSE_RATIO
+        
+        # Raio Campo (Área Proibida) calibrado
+        self.FIELD_RADIUS_X = 219.2 
+        self.FIELD_RADIUS_Y = 219.2 * self.ELLIPSE_RATIO
+        
+        self.stadium_bounds = {
+            'x_min': 0, 'x_max': self.IMG_WIDTH,
+            'y_min': 0, 'y_max': self.IMG_HEIGHT
         }
         
-        # 2 BARES (dentro do estádio, fora do campo)
-        self.bars = {
-            'BAR_OESTE': {
-                'x_min': -34, 'x_max': -27,
-                'y_min': -6, 'y_max': 0,
-                'center': [-30.5, -3],
-                'capacity': 15,  # Apenas 15 pessoas cabem no bar
-                'service_time_min': 20,
-                'service_time_max': 40,
-                'queue_spots': 25  # Espaço para 25 pessoas na fila
-            },
-            'BAR_LESTE': {
-                'x_min': 28.5, 'x_max': 37,
-                'y_min': -6, 'y_max': -2,
-                'center': [32.75, -4],
-                'capacity': 15,
-                'service_time_min': 20,
-                'service_time_max': 40,
-                'queue_spots': 25
-            }
+        # Definição Lógica das Bancadas (Setores Amplos para Gates/Estruturas)
+        self.STANDS = {
+            'Norte': {'angle_start': 45, 'angle_end': 135, 'tiers': 1, 'levels': [0]},
+            'Sul':   {'angle_start': 225, 'angle_end': 315, 'tiers': 1, 'levels': [0]},
+            'Este':  {'angle_start': 135, 'angle_end': 225, 'tiers': 2, 'levels': [0, 1]},
+            'Oeste': {'angle_start': 315, 'angle_end': 405, 'tiers': 2, 'levels': [0, 1]}
         }
         
-        # 10 CASAS DE BANHO (dentro do estádio, fora do campo)
-        self.toilets = {
-            'WC_1': {  # Canto Noroeste Superior
-                'x_min': -17.1, 'x_max': -15.2,
-                'y_min': 11.2, 'y_max': 12.6,
-                'center': [(-17.1 + -15.2)/2, (11.2 + 12.6)/2],  # [-16.15, 11.9]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            },
-            'WC_2': {  # Canto Noroeste Inferior
-                'x_min': -17.0, 'x_max': -15.2,
-                'y_min': -19.6, 'y_max': -18.1,
-                'center': [(-17.0 + -15.2)/2, (-19.6 + -18.1)/2],  # [-16.1, -18.85]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            },
-            'WC_3': {  # Centro Sul
-                'x_min': 0.1, 'x_max': 2.3,
-                'y_min': -38.2, 'y_max': -36.3,
-                'center': [(0.1 + 2.3)/2, (-38.2 + -36.3)/2],  # [1.2, -37.25]
-                'capacity': 6,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 20
-            },
-            'WC_4': {  # Canto Sudeste Inferior
-                'x_min': 15.1, 'x_max': 17.0,
-                'y_min': -19.4, 'y_max': -17.9,
-                'center': [(15.1 + 17.0)/2, (-19.4 + -17.9)/2],  # [16.05, -18.65]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            },
-            'WC_5': {  # Canto Sudeste Superior
-                'x_min': 15.2, 'x_max': 17.0,
-                'y_min': 11.2, 'y_max': 12.7,
-                'center': [(15.2 + 17.0)/2, (11.2 + 12.7)/2],  # [16.1, 11.95]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            },
-            'WC_6': {  # Centro Norte
-                'x_min': 0.1, 'x_max': 2.2,
-                'y_min': 29.8, 'y_max': 31.5,
-                'center': [(0.1 + 2.2)/2, (29.8 + 31.5)/2],  # [1.15, 30.65]
-                'capacity': 6,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 20
-            },
-            'WC_7': {  # Oeste Central Inferior
-                'x_min': -34.8, 'x_max': -32.6,
-                'y_min': -14.0, 'y_max': -12.3,
-                'center': [(-34.8 + -32.6)/2, (-14.0 + -12.3)/2],  # [-33.7, -13.15]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            },
-            'WC_8': {  # Oeste Central Superior
-                'x_min': -33.5, 'x_max': -31.5,
-                'y_min': 8.6, 'y_max': 10.2,
-                'center': [(-33.5 + -31.5)/2, (8.6 + 10.2)/2],  # [-32.5, 9.4]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            },
-            'WC_9': {  # Este Central Superior
-                'x_min': 30.9, 'x_max': 33.2,
-                'y_min': 8.5, 'y_max': 10.1,
-                'center': [(30.9 + 33.2)/2, (8.5 + 10.1)/2],  # [32.05, 9.3]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            },
-            'WC_10': {  # Este Central Inferior
-                'x_min': 30.7, 'x_max': 33.0,
-                'y_min': -16.8, 'y_max': -14.8,
-                'center': [(30.7 + 33.0)/2, (-16.8 + -14.8)/2],  # [31.85, -15.8]
-                'capacity': 4,
-                'service_time_min': 10,
-                'service_time_max': 20,
-                'queue_spots': 15
-            }
+        self.REAL_GATES = {
+            'Norte': [21, 22, 23],
+            'Sul': [7, 8, 9],
+            'Este': [10, 11, 12, 13, 17, 18],
+            'Oeste': [3, 4, 5, 6, 24, 25, 26, 27]
         }
         
-        # ZONAS DE BANCOS (dentro do estádio, fora do campo)
-        self.seating_areas = {
-            # ZONAS SUL
-            'SEAT_SUL_1': {
-                'x_min': -23.3, 'x_max': -2.8,
-                'y_min': -36.8, 'y_max': -34.0,
-                'center': [(-23.3 + -2.8)/2, (-36.8 + -34.0)/2],  # [-13.05, -35.4]
-                'capacity': 60
-            },
-            'SEAT_SUL_2': {
-                'x_min': 4.1, 'x_max': 20.7,
-                'y_min': -41.8, 'y_max': -29.5,
-                'center': [(4.1 + 20.7)/2, (-41.8 + -29.5)/2],  # [12.4, -35.65]
-                'capacity': 60
-            },
-            'SEAT_SUL_3': {
-                'x_min': 25.2, 'x_max': 37.4,
-                'y_min': -25.7, 'y_max': -9.2,
-                'center': [(25.2 + 37.4)/2, (-25.7 + -9.2)/2],  # [31.3, -17.45]
-                'capacity': 60
-            },
-            'SEAT_SUL_4': {
-                'x_min': -13.6, 'x_max': -1.1,
-                'y_min': -22.1, 'y_max': -16.0,
-                'center': [(-13.6 + -1.1)/2, (-22.1 + -16.0)/2],  # [-7.35, -19.05]
-                'capacity': 60
-            },
-            'SEAT_SUL_5': {
-                'x_min': 1.1, 'x_max': 11.6,
-                'y_min': -23.3, 'y_max': -14.4,
-                'center': [(1.1 + 11.6)/2, (-23.3 + -14.4)/2],  # [6.35, -18.85]
-                'capacity': 60
-            },
-            'SEAT_SUL_6': {
-                'x_min': -21.5, 'x_max': -12.4,
-                'y_min': -9.4, 'y_max': 1.0,
-                'center': [(-21.5 + -12.4)/2, (-9.4 + 1.0)/2],  # [-16.95, -4.2]
-                'capacity': 60
-            },
+        # Inicializar estruturas
+        self.seating_zones = self._create_seating_zones()
+        self.gates = self._create_gates()
+        self.bars = self._create_bars()
+        self.toilets = self._create_toilets()
+        self.stairs = self._create_stairs()
+        self.bins = self._create_bins()
+        
+        print(f"Estrutura carregada: {len(self.seating_zones)} zonas, {len(self.gates)} gates")
+
+    # ==================== AUXILIARES ====================
+
+    def get_center_for_level(self, level):
+        if level == 1:
+            return self.CENTER_X_L1, self.CENTER_Y_L1
+        return self.CENTER_X_L0, self.CENTER_Y_L0
+
+    def ellipse_pos(self, angle_deg, radius_x, radius_y=None, level=0):
+        """Calcula posição (x,y) usando o centro correto do nível e ratio"""
+        cx, cy = self.get_center_for_level(level)
+        
+        if radius_y is None:
+            radius_y = radius_x * self.ELLIPSE_RATIO
             
-            # ZONAS NORTE
-            'SEAT_NORTE_1': {
-                'x_min': 25.8, 'x_max': 33.9,
-                'y_min': 1.5, 'y_max': 16.2,
-                'center': [(25.8 + 33.9)/2, (1.5 + 16.2)/2],  # [29.85, 8.85]
-                'capacity': 50
-            },
-            'SEAT_NORTE_2': {
-                'x_min': 3.3, 'x_max': 23.9,
-                'y_min': 25.1, 'y_max': 30.4,
-                'center': [(3.3 + 23.9)/2, (25.1 + 30.4)/2],  # [13.6, 27.75]
-                'capacity': 50
-            },
-            'SEAT_NORTE_3': {
-                'x_min': -19.2, 'x_max': -1.8,
-                'y_min': 23.2, 'y_max': 35.5,
-                'center': [(-19.2 + -1.8)/2, (23.2 + 35.5)/2],  # [-10.5, 29.35]
-                'capacity': 50
-            },
-            'SEAT_NORTE_4': {
-                'x_min': 11.7, 'x_max': 20.4,
-                'y_min': -9.2, 'y_max': 3.1,
-                'center': [(11.7 + 20.4)/2, (-9.2 + 3.1)/2],  # [16.05, -3.05]
-                'capacity': 50
-            },
-            'SEAT_NORTE_5': {
-                'x_min': 0.1, 'x_max': 11.8,
-                'y_min': 8.5, 'y_max': 16.5,
-                'center': [(0.1 + 11.8)/2, (8.5 + 16.5)/2],  # [5.95, 12.5]
-                'capacity': 50
-            },
-            'SEAT_NORTE_6': {
-                'x_min': -12.7, 'x_max': -0.4,
-                'y_min': 7.6, 'y_max': 15.7,
-                'center': [(-12.7 + -0.4)/2, (7.6 + 15.7)/2],  # [-6.55, 11.65]
-                'capacity': 50
-            }
-        }
-        
-        # Caixotes do lixo (espalhados pelo estádio)
-        self.bins = {
-            'BIN_NORTE_1': [-30, 38], 'BIN_NORTE_2': [30, 38],
-            'BIN_SUL_1': [-30, -38], 'BIN_SUL_2': [30, -38],
-            'BIN_LESTE': [52, 0], 'BIN_OESTE': [-52, 0],
-            'BIN_BAR_LESTE': [35, -5], 'BIN_BAR_OESTE': [-32, -3],
-            'BIN_WC_NORTE_LESTE': [52, 35], 'BIN_WC_NORTE_OESTE': [-52, 35],
-            'BIN_WC_SUL_LESTE': [52, -35], 'BIN_WC_SUL_OESTE': [-52, -35]
-        }
-    
-    def is_inside_stadium_circle(self, x, y):
-        """Verifica se está dentro do círculo do estádio"""
-        distance_squared = (x - self.stadium_center[0])**2 + (y - self.stadium_center[1])**2
-        return distance_squared <= self.stadium_radius**2
-    
-    def is_inside_field(self, x, y):
-        """Verifica se está dentro do campo"""
-        return (self.field_x_min <= x <= self.field_x_max and 
-                self.field_y_min <= y <= self.field_y_max)
-    
-    def is_position_allowed(self, x, y):
-        """Verifica se posição é permitida (dentro do estádio mas fora do campo)"""
-        return self.is_inside_stadium_circle(x, y) and not self.is_inside_field(x, y)
-    
-    def get_random_position_in_zone(self, zone_info):
-        """Obtém posição aleatória dentro de uma zona"""
-        for _ in range(10):
-            x = np.random.uniform(zone_info['x_min'], zone_info['x_max'])
-            y = np.random.uniform(zone_info['y_min'], zone_info['y_max'])
-            if self.is_position_allowed(x, y):
-                return [x, y]
-        return zone_info['center']
-    
-    def get_nearest_gate(self, position):
-        """Retorna o portão mais próximo"""
-        gates_list = list(self.gates.values())
-        distances = [np.linalg.norm(np.array(position) - np.array(gate)) for gate in gates_list]
-        nearest_idx = np.argmin(distances)
-        return list(self.gates.keys())[nearest_idx], list(self.gates.values())[nearest_idx]
-    
-    def get_nearest_bar(self, position):
-        """Retorna o bar mais próximo"""
-        bars_list = list(self.bars.keys())
-        distances = []
-        for bar_name in bars_list:
-            bar_center = self.bars[bar_name]['center']
-            distances.append(np.linalg.norm(np.array(position) - np.array(bar_center)))
-        nearest_idx = np.argmin(distances)
-        nearest_bar = bars_list[nearest_idx]
-        return nearest_bar, self.bars[nearest_bar]
-    
-    def get_nearest_toilet(self, position):
-        """Retorna a casa de banho mais próxima"""
-        toilets_list = list(self.toilets.keys())
-        distances = []
-        for toilet_name in toilets_list:
-            toilet_center = self.toilets[toilet_name]['center']
-            distances.append(np.linalg.norm(np.array(position) - np.array(toilet_center)))
-        nearest_idx = np.argmin(distances)
-        nearest_toilet = toilets_list[nearest_idx]
-        return nearest_toilet, self.toilets[nearest_toilet]
-    
-    def get_queue_position(self, facility_info, queue_number):
-        """Calcula posição na fila baseada no número na fila"""
-        x = facility_info['x_min'] - 2 - (queue_number % 5) * 1.5
-        y = facility_info['y_min'] + (queue_number // 5) * 1.5
+        angle = math.radians(angle_deg)
+        x = cx + radius_x * math.cos(angle)
+        y = cy + radius_y * math.sin(angle)
         return [x, y]
     
-    def get_seat_near_gate(self, gate_name):
-        """Retorna um assento próximo do portão"""
-        gate_to_zones = {
-            'GATE_NORTH': ['SEAT_NORTE_1', 'SEAT_NORTE_2', 'SEAT_NORTE_3',
-                          'SEAT_NORTE_4', 'SEAT_NORTE_5', 'SEAT_NORTE_6'],
-            'GATE_SOUTH': ['SEAT_SUL_1', 'SEAT_SUL_2', 'SEAT_SUL_3',
-                          'SEAT_SUL_4', 'SEAT_SUL_5', 'SEAT_SUL_6'],
+    def is_position_in_field(self, x, y, level=0):
+        """Verifica se posição está no CAMPO (área proibida), ajustado por nível"""
+        cx, cy = self.get_center_for_level(level)
+        dx = x - cx
+        dy = y - cy
+        
+        rx = self.FIELD_RADIUS_X if level == 0 else self.FIELD_RADIUS_X - 10
+        ry = rx * self.ELLIPSE_RATIO
+        
+        in_ellipse = (dx / rx)**2 + (dy / ry)**2
+        return in_ellipse <= 1.0
+
+    def get_angle_from_position(self, x, y, level=0):
+        cx, cy = self.get_center_for_level(level)
+        dx = x - cx
+        dy = y - cy
+        angle = math.degrees(math.atan2(dy, dx))
+        if angle < 0: angle += 360
+        return angle
+
+    def is_angle_in_range(self, angle, start, end):
+        """Verifica se ângulo está no intervalo (com wraparound)"""
+        if end > 360:
+            return angle >= start or angle <= (end - 360)
+        else:
+            return start <= angle <= end
+
+    # ==================== CRIAÇÃO DE ZONAS (CALIBRADO) ====================
+
+    def _create_seating_zones(self):
+        zones = {}
+
+        zones['NORTE_L0'] = {
+            'type': 'elliptical_sector',
+            'level': 0,
+            'sector': 'NORTE',
+            'angle_start': 46.8,
+            'angle_end': 133.0,
+            'radius_inner_x': 226.2,
+            'radius_outer_x': 357.3,
+            'capacity': 200
         }
-        zones = gate_to_zones.get(gate_name, list(self.seating_areas.keys()))
-        zone_name = np.random.choice(zones)
-        zone_info = self.seating_areas[zone_name]
-        seat_position = self.get_random_position_in_zone(zone_info)
-        return zone_name, seat_position
+
+        zones['SUL_L0'] = {
+            'type': 'elliptical_sector',
+            'level': 0,
+            'sector': 'SUL',
+            'angle_start': 226.6,
+            'angle_end': 311.8,
+            'radius_inner_x': 229.8,
+            'radius_outer_x': 360.1,
+            'capacity': 200
+        }
+
+        zones['ESTE_L0'] = {
+            'type': 'elliptical_sector',
+            'level': 0,
+            'sector': 'ESTE',
+            'angle_start': 137.1,
+            'angle_end': 220.3,
+            'radius_inner_x': 230.6,
+            'radius_outer_x': 346.6,
+            'capacity': 200
+        }
+
+        zones['OESTE_L0'] = {
+            'type': 'elliptical_sector',
+            'level': 0,
+            'sector': 'OESTE',
+            'angle_start': 316.6,
+            'angle_end': 402.6,
+            'radius_inner_x': 226.6,
+            'radius_outer_x': 339.2,
+            'capacity': 200
+        }
+
+        zones['ESTE_L1'] = {
+            'type': 'elliptical_sector',
+            'level': 1,
+            'sector': 'ESTE',
+            'angle_start': 141.5,
+            'angle_end': 223.0,
+            'radius_inner_x': 240.2,
+            'radius_outer_x': 348.0,
+            'capacity': 200
+        }
+
+        zones['OESTE_L1'] = {
+            'type': 'elliptical_sector',
+            'level': 1,
+            'sector': 'OESTE',
+            'angle_start': 318.0,
+            'angle_end': 398.0,
+            'radius_inner_x': 236.3,
+            'radius_outer_x': 342.6,
+            'capacity': 200
+        }
+        return zones
+
+    # ==================== OUTRAS ESTRUTURAS ====================
+
+    def _create_gates(self):
+        # Gates manuais calibrados
+        raw_gates = {
+            'GATE_21': {'pos': [746, 869], 'sec': 'Norte'},
+            'GATE_22': {'pos': [984, 815], 'sec': 'Norte'},
+            'GATE_23': {'pos': [1125, 712], 'sec': 'Norte'},
+            
+            'GATE_7': {'pos': [1190, 626], 'sec': 'Sul'}, # Nota: User chamou Sul mas coords parecem Oeste na imagem? Vou confiar na label do user.
+            'GATE_8': {'pos': [1220, 528], 'sec': 'Sul'},
+            'GATE_9': {'pos': [1220, 431], 'sec': 'Sul'},
+            
+            'GATE_10': {'pos': [1188, 330], 'sec': 'Este'},
+            'GATE_11': {'pos': [1126, 247], 'sec': 'Este'},
+            'GATE_12': {'pos': [986, 142], 'sec': 'Este'}, 
+            'GATE_13': {'pos': [744, 92], 'sec': 'Este'},
+            'GATE_17': {'pos': [506, 146], 'sec': 'Este'},
+            'GATE_18': {'pos': [375, 232], 'sec': 'Este'},
+            
+            'GATE_3': {'pos': [325, 300], 'sec': 'Oeste'},
+            'GATE_4': {'pos': [285, 369], 'sec': 'Oeste'},
+            'GATE_5': {'pos': [266, 446], 'sec': 'Oeste'},
+            'GATE_6': {'pos': [266, 521], 'sec': 'Oeste'},
+            'GATE_24': {'pos': [285, 601], 'sec': 'Oeste'},
+            'GATE_25': {'pos': [325, 665], 'sec': 'Oeste'},
+            'GATE_26': {'pos': [375, 725], 'sec': 'Oeste'},
+            'GATE_27': {'pos': [504, 819], 'sec': 'Oeste'}
+        }
+        
+        gates = {}
+        cx, cy = self.get_center_for_level(0)
+        
+        for name, info in raw_gates.items():
+            x, y = info['pos']
+            angle = math.degrees(math.atan2(y - cy, x - cx))
+            if angle < 0: angle += 360
+            
+            # Este=Esquerda(180), Oeste=Direita(0), Norte=Cima(90), Sul=Baixo(270)
+            if 45 <= angle < 135: real_sector = 'Norte'
+            elif 135 <= angle < 225: real_sector = 'Este'
+            elif 225 <= angle < 315: real_sector = 'Sul'
+            else: real_sector = 'Oeste'
+            
+            num = int(name.split('_')[1])
+            gates[name] = {
+                'location': info['pos'],
+                'level': 0,
+                'gate_number': num,
+                'sector': real_sector,
+                'capacity': 40
+            }
+        return gates
+
+    def _create_bars(self):
+        bars = {}
+        bars['REST_L0_1'] = { 'center': [744.2, 818.6], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_2'] = { 'center': [957.8, 768.0], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_3'] = { 'center': [1109.5, 648.1], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_4'] = { 'center': [1169.5, 481.4], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_5'] = { 'center': [1109.5, 316.5], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_6'] = { 'center': [955.9, 194.7], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_7'] = { 'center': [746.1, 144.1], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_8'] = { 'center': [534.4, 194.7], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_9'] = { 'center': [378.9, 314.6], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_10'] = { 'center': [322.7, 479.5], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_11'] = { 'center': [380.8, 644.4], 'level': 0, 'capacity': 20 }
+        bars['REST_L0_12'] = { 'center': [536.3, 768.0], 'level': 0, 'capacity': 20 }
+        return bars
+
+    def _create_toilets(self):
+        toilets = {}
+        toilets['WC_L0_1'] = { 'center': [639.3, 786.7], 'level': 0, 'capacity': 10 }
+        toilets['WC_L0_2'] = { 'center': [851.0, 788.6], 'level': 0, 'capacity': 10 }
+        toilets['WC_L0_3'] = { 'center': [1141.4, 565.7], 'level': 0, 'capacity': 10 }
+        toilets['WC_L0_4'] = { 'center': [1139.5, 397.1], 'level': 0, 'capacity': 10 }
+        toilets['WC_L0_5'] = { 'center': [852.9, 172.2], 'level': 0, 'capacity': 10 }
+        toilets['WC_L0_6'] = { 'center': [639.3, 174.1], 'level': 0, 'capacity': 10 }
+        toilets['WC_L0_7'] = { 'center': [348.9, 400.8], 'level': 0, 'capacity': 10 }
+        toilets['WC_L0_8'] = { 'center': [348.9, 561.9], 'level': 0, 'capacity': 10 }
+        toilets['WC_L1_1'] = { 'center': [586.2, 813.7], 'level': 1, 'capacity': 10 }
+        toilets['WC_L1_2'] = { 'center': [832.2, 813.7], 'level': 1, 'capacity': 10 }
+        toilets['WC_L1_3'] = { 'center': [1159.0, 553.7], 'level': 1, 'capacity': 10 }
+        toilets['WC_L1_4'] = { 'center': [1159.0, 362.1], 'level': 1, 'capacity': 10 }
+        toilets['WC_L1_5'] = { 'center': [828.7, 107.4], 'level': 1, 'capacity': 10 }
+        toilets['WC_L1_6'] = { 'center': [584.4, 107.4], 'level': 1, 'capacity': 10 }
+        toilets['WC_L1_7'] = { 'center': [255.9, 367.4], 'level': 1, 'capacity': 10 }
+        toilets['WC_L1_8'] = { 'center': [254.1, 557.2], 'level': 1, 'capacity': 10 }
+        return toilets
+
+    def _create_stairs(self):
+        # Escadas manuais (calibração user)
+        # Replicam para Nível 1 automaticamente (levels=[0,1])
+        raw_stairs = {
+            'STAIRS_1': [274, 476],
+            'STAIRS_2': [332, 676],
+            'STAIRS_3': [413, 751],
+            'STAIRS_4': [744, 864],
+            'STAIRS_5': [1078, 753],
+            'STAIRS_6': [1218, 483],
+            'STAIRS_7': [1162, 287],
+            'STAIRS_8': [1080, 212],
+            'STAIRS_9': [748, 101],
+            'STAIRS_10': [414, 213]
+        }
+        
+        stairs = {}
+        for name, loc in raw_stairs.items():
+            stairs[name] = {
+                'location': loc,
+                'levels': [0, 1],
+                'type': 'stairs'
+            }
+        return stairs
+
+    def _create_bins(self):
+        bins = {}
+        for i in range(12):
+            angle = i * 360 / 12
+            level = i % 2
+            loc = self.ellipse_pos(angle, self.CORRIDOR_MID_X - 20, level=level)
+            bins[f'BIN_{i+1}'] = {'location': loc, 'level': level}
+        return bins
+
+    # ==================== API PÚBLICA ====================
+
+    def get_random_seat_in_zone(self, zone_name):
+        zone = self.seating_zones.get(zone_name)
+        if not zone: return None
+        
+        # Ângulo
+        angle = np.random.uniform(zone['angle_start'], zone['angle_end'])
+        
+        # Raio (Interpolado)
+        r_ratio = np.random.uniform(0, 1)
+        rx_inner = zone['radius_inner_x']
+        rx_outer = zone['radius_outer_x']
+        
+        rx_final = rx_inner + r_ratio * (rx_outer - rx_inner)
+        
+        return self.ellipse_pos(angle, rx_final, level=zone['level'])
+
+    def get_zone_for_gate(self, gate_name, level=0):
+        gate = self.gates.get(gate_name)
+        if not gate: return 'NORTE_L0'
+        sector = gate['sector']
+        suffix = 'L1' if level == 1 and sector in ['Este', 'Oeste'] else 'L0'
+        return f"{sector.upper()}_{suffix}"
+    
+    def get_nearest_gate(self, position, level=0, target_sector=None):
+        min_dist = float('inf')
+        nearest = None
+        
+        # Se target_sector for definido, filtramos apenas gates desse setor
+        # Se não encontrar nenhuma (erro), faz fallback para todas
+        candidates = self.gates.items()
+        if target_sector:
+            sector_candidates = {k:v for k,v in self.gates.items() if v['sector'].upper() == target_sector.upper()}
+            if sector_candidates:
+                candidates = sector_candidates.items()
+        
+        for name, info in candidates:
+            if info['level'] == level:
+                dist = np.linalg.norm(np.array(position) - np.array(info['location']))
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest = (name, info)
+        return nearest
+
+    def get_nearest_bar(self, position, level):
+        return self._get_nearest_generic(self.bars, position, level)
+        
+    def get_nearest_toilet(self, position, level):
+        return self._get_nearest_generic(self.toilets, position, level)
+
+    def get_nearest_stairs(self, position, current_level, target_level=None):
+        valid = []
+        for name, info in self.stairs.items():
+            if current_level in info['levels']:
+                if target_level is None or target_level in info['levels']:
+                    valid.append((name, info))
+        
+        if not valid: return None, None
+        
+        min_dist = float('inf')
+        nearest = None
+        for name, info in valid:
+            dist = np.linalg.norm(np.array(position) - np.array(info['location']))
+            if dist < min_dist:
+                min_dist = dist
+                nearest = (name, info)
+        return nearest
+
+    def _get_nearest_generic(self, collection, position, level):
+        subset = {k:v for k,v in collection.items() if v['level'] == level}
+        if not subset: return None, None
+        min_dist = float('inf')
+        nearest = None
+        for name, info in subset.items():
+            dist = np.linalg.norm(np.array(position) - np.array(info['center'] if 'center' in info else info['location']))
+            if dist < min_dist:
+                min_dist = dist
+                nearest = (name, info)
+        return nearest
+
+    def is_position_valid(self, x, y, level=0):
+        if not (0 <= x <= self.IMG_WIDTH and 0 <= y <= self.IMG_HEIGHT):
+            return False
+            
+        if self.is_position_in_field(x, y, level): # Pass level here
+            return False
+            
+        # Limites exteriores DESATIVADOS a pedido
+        return True

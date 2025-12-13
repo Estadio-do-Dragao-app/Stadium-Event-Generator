@@ -30,7 +30,7 @@ class EventGenerator:
         
         print("Gerador de eventos inicializado")
     
-    def generate_event(self, event_type, person_id, location, metadata=None):
+    def generate_event(self, event_type, person_id, location, level=0, metadata=None):
         """Evento genérico de pessoa"""
         event = {
             "event_id": str(uuid.uuid4()),
@@ -38,6 +38,7 @@ class EventGenerator:
             "timestamp": datetime.now().isoformat() + "Z",
             "person_id": f"P_{person_id:06d}",
             "ticket_id": f"TKT_{person_id:06d}",
+            "level": level,
             "location": location,
             "metadata": metadata or {}
         }
@@ -47,7 +48,7 @@ class EventGenerator:
         return event
     
     def generate_gate_event(self, gate_name, person_id, direction="entry"):
-        """Evento de passagem por portão"""
+        """Evento de passagem por portão (Level é sempre 0)"""
         self.gate_counters[gate_name] += 1 if direction == "entry" else -1
         
         throughput = np.random.uniform(15, 25)
@@ -58,6 +59,7 @@ class EventGenerator:
             "timestamp": datetime.now().isoformat() + "Z",
             "gate_id": gate_name,
             "person_id": f"P_{person_id:06d}",
+            "level": 0, # Passagem sempre no piso 0
             "direction": direction,
             "current_count": self.gate_counters[gate_name],
             "throughput_per_min": round(throughput, 1),
@@ -72,7 +74,7 @@ class EventGenerator:
         self.event_count += 1
         return event
     
-    def generate_bin_event(self, bin_id, location, fill_percentage=None):
+    def generate_bin_event(self, bin_id, location, level=0, fill_percentage=None):
         """Evento de enchimento de caixote do lixo"""
         if fill_percentage is None:
             current = self.bin_fill_levels.get(bin_id, 0)
@@ -85,6 +87,7 @@ class EventGenerator:
             "event_type": "bin_status",
             "timestamp": datetime.now().isoformat() + "Z",
             "bin_id": bin_id,
+            "level": level,
             "location": {"x": float(location[0]), "y": float(location[1])},
             "fill_percentage": round(fill_percentage, 1),
             "needs_service": fill_percentage > 85,
@@ -101,13 +104,14 @@ class EventGenerator:
         self.event_count += 1
         return event
     
-    def generate_bin_overflow_alert(self, bin_id, location):
+    def generate_bin_overflow_alert(self, bin_id, location, level=0):
         """Alerta CRÍTICO de caixote a transbordar"""
         event = {
             "event_id": str(uuid.uuid4()),
             "event_type": "bin_overflow_alert",
             "timestamp": datetime.now().isoformat() + "Z",
             "bin_id": bin_id,
+            "level": level,
             "location": {"x": float(location[0]), "y": float(location[1])},
             "priority": "high",
             "assigned_role": "cleaning",
@@ -121,7 +125,7 @@ class EventGenerator:
         self.event_count += 1
         return event
     
-    def generate_queue_event(self, location_type, location_id, location, queue_length, capacity, avg_service_time=None):
+    def generate_queue_event(self, location_type, location_id, location, queue_length, capacity, level=0, avg_service_time=None):
         """Evento de fila de espera (QUEUE SERVICE)"""
         # Tempos de serviço em segundos, convertidos para minutos para cálculo
         if location_type == "BAR":
@@ -145,25 +149,18 @@ class EventGenerator:
             "timestamp": datetime.now().isoformat() + "Z",
             "location_type": location_type,
             "location_id": location_id,
+            "level": level,
             "location": {"x": float(location[0]), "y": float(location[1])},
             "queue_length": queue_length,
             "capacity": capacity,
             "occupancy_rate": round(occupancy_rate, 1),
             "estimated_wait_min": round(wait_time_min, 1),
             "metadata": {
-                "status": "critico" if wait_time_min > 3 
-                        else "alto" if wait_time_min > 1.5 
-                        else "medio" if wait_time_min > 0.5
-                        else "normal",
-                "queue_status": "cheio" if occupancy_rate > 90 
-                            else "alto" if occupancy_rate > 70 
-                            else "medio" if occupancy_rate > 50 
-                            else "baixo",
                 "avg_service_time_sec": avg_service_time_sec,
                 "service_capacity_per_min": service_capacity
             }
         }
-                
+        
         self.events.append(event)
         self.mqtt_client.publish(MQTT_TOPIC_ALL_EVENTS, json.dumps(event))
         self.mqtt_client.publish(MQTT_TOPIC_QUEUES, json.dumps(event))
@@ -171,12 +168,13 @@ class EventGenerator:
         self.event_count += 1
         return event
     
-    def generate_heatmap_density(self, grid_data):
+    def generate_heatmap_density(self, grid_data, level=0):
         """Gera evento de heatmap com dados de densidade por coordenada"""
         event = {
             "event_id": str(uuid.uuid4()),
             "event_type": "crowd_density",
             "timestamp": datetime.now().isoformat() + "Z",
+            "level": level,
             "grid_data": grid_data,
             "total_people": sum(cell["count"] for cell in grid_data),
             "metadata": {
@@ -191,13 +189,14 @@ class EventGenerator:
         self.event_count += 1
         return event
     
-    def generate_fire_alert(self, location_id, location, zones, severity="high"):
+    def generate_fire_alert(self, location_id, location, zones, level=0, severity="high"):
         """Gera um alerta crítico de incêndio"""
         event = {
             "event_id": str(uuid.uuid4()),
             "event_type": "fire_alert",
             "timestamp": datetime.now().isoformat() + "Z",
             "location_id": location_id,
+            "level": level,
             "location": {"x": float(location[0]), "y": float(location[1])},
             "severity": severity,
             "metadata": {
@@ -207,7 +206,7 @@ class EventGenerator:
                 "affected_areas": zones
             }
         }
-                
+        
         self.events.append(event)
         self.mqtt_client.publish(MQTT_TOPIC_ALL_EVENTS, json.dumps(event))
         self.mqtt_client.publish(MQTT_TOPIC_ALERTS, json.dumps(event))

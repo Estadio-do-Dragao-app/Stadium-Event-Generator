@@ -19,7 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY simulator/ ./simulator/
-COPY test.py .
 
 # Create outputs directory
 RUN mkdir -p outputs

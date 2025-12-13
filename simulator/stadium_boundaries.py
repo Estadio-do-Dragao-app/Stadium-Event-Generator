@@ -12,7 +12,7 @@ class StadiumBoundaries:
         # ==================== CONFIGURAÇÃO VIA API ====================
         print("Inicializando StadiumBoundaries via API...")
         
-        self.API_URL = "http://localhost:8000"
+        self.API_URL = "http://localhost:8001"
         self.nodes = []
         
         # Estruturas de dados
@@ -37,8 +37,12 @@ class StadiumBoundaries:
         except Exception as e:
             print(f"ERRO CRÍTICO ao carregar API: {e}")
             print("Verifique se o backend está a correr em localhost:8000")
-            # Fallback vazio ou crashar? Melhor crashar para user ver.
-            # Mas user pode querer continuar... vamos tentar continuar
+            print("⚠️ ATIVANDO MODO FALLBACK (DADOS SINTÉTICOS) ⚠️")
+            self._create_fallback_data()
+            
+        if not self.seating_zones:
+             print("⚠️ API retornou dados vazios. ATIVANDO MODO FALLBACK.")
+             self._create_fallback_data()
         
         print(f"Estrutura carregada: {len(self.seating_zones)} zonas, {len(self.gates)} gates")
 
@@ -208,6 +212,55 @@ class StadiumBoundaries:
                      end_angle += 360
                  zone['angle_start'] = start_angle
                  zone['angle_end'] = end_angle
+
+    def _create_fallback_data(self):
+        """Creates dummy data so the simulator can run without API"""
+        print("Criando dados de fallback...")
+        self.seating_zones = {}
+        self.seats_by_block = {}
+        sectors = ['Norte', 'Sul', 'Este', 'Oeste']
+        for i, sector in enumerate(sectors):
+            # Level 0
+            z0 = f"{sector.upper()}_L0"
+            self.seating_zones[z0] = {
+                'level': 0, 'sector': sector, 'seats': [],
+                'angle_start': i*90, 'angle_end': (i+1)*90,
+                'radius_inner_x': 100, 'radius_outer_x': 140
+            }
+            # Generate dummy seats
+            for _ in range(20):
+                ang = np.random.uniform(i*90, (i+1)*90)
+                pos = self.ellipse_pos(ang, np.random.uniform(100, 140), level=0)
+                self.seats_by_block.setdefault(z0, []).append({'x': pos[0], 'y': pos[1]})
+                
+            # Level 1
+            z1 = f"{sector.upper()}_L1"
+            self.seating_zones[z1] = {
+                'level': 1, 'sector': sector, 'seats': [],
+                'angle_start': i*90, 'angle_end': (i+1)*90,
+                'radius_inner_x': 100, 'radius_outer_x': 140
+            }
+             # Generate dummy seats
+            for _ in range(20):
+                ang = np.random.uniform(i*90, (i+1)*90)
+                pos = self.ellipse_pos(ang, np.random.uniform(100, 140), level=1)
+                self.seats_by_block.setdefault(z1, []).append({'x': pos[0], 'y': pos[1]})
+
+        # Create Gates
+        for i in range(1, 9):
+            name = f"GATE_{i}"
+            angle = (i-1) * 45
+            pos = self.ellipse_pos(angle, 200, level=0)
+            self.gates[name] = {
+                'location': pos, 'level': 0, 'gate_number': i, 'sector': 'Norte'
+            }
+
+        # Create Stairs
+        self.stairs['STAIR_1'] = {'location': self.ellipse_pos(45, 180, level=0), 'levels': [0, 1]}
+        
+        # Create POIs
+        self.bars['BAR_1'] = {'center': self.ellipse_pos(0, 180, level=0), 'level': 0}
+        self.toilets['WC_1'] = {'center': self.ellipse_pos(180, 180, level=0), 'level': 0}
 
     # ==================== HELPERS ====================
 

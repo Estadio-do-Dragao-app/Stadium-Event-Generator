@@ -417,6 +417,9 @@ class StadiumSimulation:
                 if step % 5 == 0: 
                     self._update_display(axes, fig, step)
                     plt.pause(0.01) # Única pausa do loop!
+
+                if step % 10 == 0:
+                    self._generate_heatmaps()
                 
                 if step % 60 == 0:
                     l0 = np.sum(self.people_levels == 0)
@@ -433,6 +436,48 @@ class StadiumSimulation:
         finally:
             plt.ioff()
             plt.show()
+
+    def _generate_heatmaps(self):
+        """Gera heatmaps para ambos os pisos usando numpy histogram"""
+        grid_step = 50 # 50 pixels approx 5 meters
+        width, height = 1481, 945
+        
+        x_bins = np.arange(0, width + grid_step, grid_step)
+        y_bins = np.arange(0, height + grid_step, grid_step)
+        
+        for level in [0, 1]:
+            mask = (self.people_levels == level)
+            if not np.any(mask):
+                # Send empty update to clear if no one is there
+                self.event_gen.generate_heatmap_density([], level=level)
+                continue
+                
+            active_positions = self.positions[mask]
+            
+            # Use histogram2d for fast binning
+            hist, _, _ = np.histogram2d(
+                active_positions[:, 0], 
+                active_positions[:, 1], 
+                bins=[x_bins, y_bins]
+            )
+            
+            # Convert to format expected by backend
+            grid_data = []
+            nx, ny = hist.shape
+            for i in range(nx):
+                for j in range(ny):
+                    count = int(hist[i, j])
+                    if count > 0:
+                        # Center of the cell
+                        cx = x_bins[i] + grid_step/2
+                        cy = y_bins[j] + grid_step/2
+                        grid_data.append({
+                            "x": int(cx),
+                            "y": int(cy),   
+                            "count": count
+                        })
+            
+            self.event_gen.generate_heatmap_density(grid_data, level=level)
 
 def main():
     sim = StadiumSimulation(num_people=500, duration=2200)

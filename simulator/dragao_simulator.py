@@ -37,6 +37,8 @@ class StadiumSimulation:
         self.current_destinations = {} 
         self.time_in_facility = np.zeros(num_people)
         self.in_queue = np.zeros(num_people, dtype=bool)
+        self.target_poi = {} # Track which POI they are going to
+        self.poi_queue_sizes = {} # Track queue size per POI
         
         # Escadas
         self.stair_time = np.zeros(num_people)
@@ -174,15 +176,15 @@ class StadiumSimulation:
                      # Sair gradualmente
                     if np.random.random() < 0.05: self._initiate_exit(i)
                 
-                # Intervalo: Ir ao Bar/WC (FREQUENTE - 2%)
+                # Intervalo: Ir ao Bar/WC (MUITO FREQUENTE - 5%)
                 elif self.timeline["half_time"] <= current_time < self.timeline["game_resume"]:
                     if self.states[i] == 4:
-                        if np.random.random() < 0.02: 
+                        if np.random.random() < 0.05: 
                             self._go_to_bar(i) if np.random.random() < 0.6 else self._go_to_toilet(i)
 
-                # Durante Jogo: (RARO - 0.05%)
+                # Durante Jogo: (MODERADO - 1%)
                 elif current_time > self.timeline["game_start"] and current_time < self.timeline["game_end"]:
-                     if np.random.random() < 0.0005:
+                     if np.random.random() < 0.01:
                         self._go_to_bar(i) if np.random.random() < 0.6 else self._go_to_toilet(i)
             
             # ================= SERVIÇOS =================
@@ -190,14 +192,27 @@ class StadiumSimulation:
                 self._move_to_destination(i, self.walk_speed)
                 if np.linalg.norm(self.destinations[i] - pos) < 3.0:
                     self.states[i] += 2 
-                    self.time_in_facility[i] = 60 # 60 segundos no serviço
-                    # Evento Queue
+                    # Tempo de serviço variável: 30-120 segundos
+                    self.time_in_facility[i] = np.random.randint(30, 120)
+                    # Evento Queue - incrementar contador
                     loc_type = "BAR" if self.states[i] == 7 else "TOILET"
-                    self.event_gen.generate_queue_event(loc_type, "UNK", self.destinations[i], 1, 10, level=int(level))
+                    poi_id = self.target_poi.get(i, "UNK")
+                    if poi_id != "UNK":
+                        self.poi_queue_sizes[poi_id] = self.poi_queue_sizes.get(poi_id, 0) + 1
+                    queue_size = self.poi_queue_sizes.get(poi_id, 1)
+                    self.event_gen.generate_queue_event(loc_type, poi_id, self.destinations[i], queue_size, 10, level=int(level))
             
             elif self.states[i] in [7, 11]: # Esperando
                 self.time_in_facility[i] -= 1
                 if self.time_in_facility[i] <= 0:
+                    # Decrementar fila ao sair
+                    poi_id = self.target_poi.get(i, "UNK")
+                    if poi_id != "UNK" and poi_id in self.poi_queue_sizes:
+                        self.poi_queue_sizes[poi_id] = max(0, self.poi_queue_sizes[poi_id] - 1)
+                        # Enviar evento com novo tamanho
+                        loc_type = "BAR" if self.states[i] == 7 else "TOILET"
+                        queue_size = self.poi_queue_sizes[poi_id]
+                        self.event_gen.generate_queue_event(loc_type, poi_id, self.destinations[i], queue_size, 10, level=int(level))
                     # Voltar ao lugar
                     target_zone = self.current_destinations.get(i)
                     if target_zone:
@@ -247,6 +262,7 @@ class StadiumSimulation:
         if info:
             self.states[i] = 5
             self.destinations[i] = info['center']
+            self.target_poi[i] = name
             
     def _go_to_toilet(self, i):
         level = self.people_levels[i]
@@ -254,6 +270,7 @@ class StadiumSimulation:
         if info:
             self.states[i] = 9
             self.destinations[i] = info['center']
+            self.target_poi[i] = name
 
     def _move_to_destination(self, i, speed):
         """Movimento robusto com Sliding e Debug"""
@@ -426,8 +443,8 @@ class StadiumSimulation:
                     l1 = np.sum(self.people_levels == 1)
                     st = self.states
                     seated = np.sum(st == 4)
-                    serv = np.sum((st == 6) | (st == 10))
-                    queue = np.sum((st == 7) | (st == 11))
+                    serv = np.sum((st == 7) | (st == 11))  # No Bar (7) ou No WC (11) - em serviço
+                    queue = np.sum((st == 5) | (st == 9))  # Indo Bar (5) ou Indo WC (9) - a caminho/fila
                     move = self.num_people - seated - serv - queue
                     print(f"Time: {step//60:02d}m | L0:{l0} L1:{l1} | Seated: {seated} in Service: {serv} in Queue: {queue} Moving: {move}") 
                 

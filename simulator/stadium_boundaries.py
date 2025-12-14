@@ -6,13 +6,15 @@ import numpy as np
 import math
 import requests
 import sys
+import os
 
 class StadiumBoundaries:
     def __init__(self):
         # ==================== CONFIGURAÇÃO VIA API ====================
         print("Inicializando StadiumBoundaries via API...")
         
-        self.API_URL = "http://localhost:8001"
+        # Use environment variable or default to mapservice container name
+        self.API_URL = os.environ.get("MAP_SERVICE_URL", "http://mapservice:8000")
         self.nodes = []
         
         # Estruturas de dados
@@ -36,7 +38,7 @@ class StadiumBoundaries:
             self._fetch_data_from_api()
         except Exception as e:
             print(f"ERRO CRÍTICO ao carregar API: {e}")
-            print("Verifique se o backend está a correr em localhost:8000")
+            print(f"Verifique se o Map-Service está a correr ({self.API_URL})")
             print("⚠️ ATIVANDO MODO FALLBACK (DADOS SINTÉTICOS) ⚠️")
             self._create_fallback_data()
             

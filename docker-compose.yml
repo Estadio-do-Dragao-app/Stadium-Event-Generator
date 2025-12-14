@@ -24,13 +24,18 @@ services:
       - MQTT_BROKER_HOST=mosquitto
       - MQTT_BROKER_PORT=1883
       - DISPLAY_MODE=headless
+      - MAP_SERVICE_URL=http://mapservice:8000
     volumes:
       - ./outputs:/app/outputs
     networks:
       - stadium-network
+      - map-network
     stdin_open: true
     tty: true
 
 networks:
   stadium-network:
     driver: bridge
+  map-network:
+    external: true
+    name: map-service_map-network

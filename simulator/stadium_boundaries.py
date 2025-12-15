@@ -29,7 +29,7 @@ class StadiumBoundaries:
         # Center defaults (API uses 500, 400 typically)
         self.CENTER_X = 500
         self.CENTER_Y = 400
-        self.FIELD_RADIUS_X = 150 # Estimated field radius
+        self.FIELD_RADIUS_X = 50 # Estimated field radius
         self.IMG_WIDTH = 1481 # Manter compatibilidade com imagem (mas coords serão API)
         self.IMG_HEIGHT = 945
         
@@ -111,12 +111,10 @@ class StadiumBoundaries:
         }
 
     def _process_stairs(self, node):
-        # Stairs/Ramps
-        # Simulator expects pairs? Or just locations. 
-        # API defines one node per level.
+        # Stairs/Ramps - conectam os dois níveis (0 e 1)
         self.stairs[node['id']] = {
             'location': [node['x'], node['y']],
-            'levels': [node['level']], # Actually it connects levels, but node is at one level
+            'levels': [0, 1],  # Escadas conectam ambos os níveis
             'type': node['type']
         }
         
@@ -349,7 +347,7 @@ class StadiumBoundaries:
     def _get_nearest_generic(self, collection, position, level):
         # Helper
         min_dist = float('inf')
-        nearest = None, None
+        nearest = None
         
         for name, info in collection.items():
             # Check level? POIs have strict levels. Stairs connect levels.

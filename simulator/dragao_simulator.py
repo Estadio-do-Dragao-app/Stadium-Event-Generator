@@ -113,9 +113,17 @@ class StadiumSimulation:
             
             # 3. Calcular Caminho Reverso
             if target_level == 1:
-                stair_name, stair_info = self.boundaries.get_nearest_stairs(seat_pos, 1, 0)
+                stair_result = self.boundaries.get_nearest_stairs(seat_pos, 1, 0)
+                if not stair_result:
+                    continue  # Skip if no stairs found
+                
+                stair_name, stair_info = stair_result
                 # Gate mais perto da ESCADA
-                gate_name, gate_info = self.boundaries.get_nearest_gate(stair_info['location'], level=0)
+                gate_result = self.boundaries.get_nearest_gate(stair_info['location'], level=0)
+                if not gate_result:
+                    continue  # Skip if no gate found
+                    
+                gate_name, gate_info = gate_result
                 
                 self.positions[i] = gate_info['location']
                 self.entry_gates[i] = gate_name
@@ -126,7 +134,11 @@ class StadiumSimulation:
                 
             else: # target_level == 0
                 # Gate mais perto do LUGAR
-                gate_name, gate_info = self.boundaries.get_nearest_gate(seat_pos, level=0)
+                gate_result = self.boundaries.get_nearest_gate(seat_pos, level=0)
+                if not gate_result:
+                    continue  # Skip if no gate found
+                    
+                gate_name, gate_info = gate_result
                 
                 self.positions[i] = gate_info['location']
                 self.entry_gates[i] = gate_name
